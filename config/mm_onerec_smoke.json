@@ -1,0 +1,9 @@
+{
+  "dataset": {"name": "synthetic_smoke", "max_items": 20},
+  "text_encoder": {"source": "deterministic synthetic fixture"},
+  "image_encoder": {"model": "google/siglip-base-patch16-224", "smoke_backend": "histogram"},
+  "fusion": {"mode": "weighted", "alpha": 0.7, "projection": "pca", "target_dim": 16},
+  "sid": {"method": "rqkmeans_plus"},
+  "model": {"name": "Qwen2.5-0.5B"},
+  "training": {"status": "not evaluated yet", "seed": 42}
+}

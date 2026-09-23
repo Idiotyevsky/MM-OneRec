@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
+cd "${REPO_ROOT}"
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
+PYTHON_SCRIPT="scripts/convert_dataset.py"
+
+INPUT_DIR="data/Amazon18/Industrial_and_Scientific"
+
+OUTPUT_DIR="data/Amazon18"
+
+DATASET_NAME="Industrial_and_Scientific"
+
+# ===========================================
+
+echo "Start converting $DATASET_NAME ..."
+
+python $PYTHON_SCRIPT \
+    --dataset_name $DATASET_NAME \
+    --data_dir $INPUT_DIR \
+    --output_dir $OUTPUT_DIR \
+    --category $DATASET_NAME \
+    --seed 42
+
+echo "Finished!"
