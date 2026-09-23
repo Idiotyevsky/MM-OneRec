@@ -302,9 +302,9 @@ root
 
 分别报告 `HR@10` 和 `NDCG@10`，用于观察视觉信息是否帮助低频商品。项目不会预设 MM-SID 一定改善 tail，而是把它作为可验证的分析维度。
 
-### 评估注意事项
+### 评估协议
 
-当前 pilot 使用 5-beam constrained decoding，因此 `HR@5`、`HR@10`、`HR@20` 数值相同是预期现象，不是指标计算错误；正式实验会在更大的候选数和完整 checkpoint 上重新评估。
+正式结果统一使用 Amazon23 `Industrial_and_Scientific_1m` 的完整 test split（7,974 条样本）、Trie constrained decoding、`num_beams=20`、`max_new_tokens=8` 和相同的指标脚本。四个 checkpoint 的输入字段、候选数和指标口径完全一致，因此 `HR@5`、`HR@10`、`HR@20` 分别对应独立的 Top-5/10/20 结果。
 
 ---
 
@@ -315,8 +315,8 @@ root
 | Track | Item representation | Dataset | Result / reference artifact |
 | --- | --- | --- | --- |
 | Original MiniOneRec reference | 原项目 qwen-td embedding + 原始 SID index | Amazon18 `Industrial_and_Scientific` / `Office_Products` | `data/Amazon/` |
-| MM-OneRec Text-SID | frozen SigLIP text embedding + RQ-VAE | Amazon23 `Industrial_and_Scientific_1m` | `outputs/eval_full/text_*` |
-| MM-OneRec MM-SID | normalized text/image fusion + RQ-VAE | Amazon23 `Industrial_and_Scientific_1m` | `outputs/eval_full/mm_*` |
+| MM-OneRec Text-SID | frozen SigLIP text embedding + RQ-VAE | Amazon23 `Industrial_and_Scientific_1m` | `outputs/formal_amazon23_1m/text_*` |
+| MM-OneRec MM-SID | normalized text/image fusion + RQ-VAE | Amazon23 `Industrial_and_Scientific_1m` | `outputs/formal_amazon23_1m/mm_*` |
 
 ### 原项目 reference data
 
@@ -329,18 +329,18 @@ root
 
 其中 `Industrial_and_Scientific` 的 train/valid/test 行数为 `31,778 / 4,532 / 4,533`，`Office_Products` 为 `32,120 / 4,866 / 4,866`。这些文件可以直接作为原项目 baseline 的输入协议，后续替换为对应 checkpoint 的预测结果即可形成同口径对照。
 
-### MM-OneRec pilot：完整 test split
+### MM-OneRec 正式 Amazon23 评估
 
-当前统一评估表来自固定 dense small subset：999 items、2,564 个 test users、5-beam Trie decoding。Text-SID 与 MM-SID 使用相同的 Qwen、训练任务和评估脚本，仅改变 Item embedding → SID 链路。
+Text-SID 与 MM-SID 使用相同的 Qwen checkpoint 结构、训练任务、完整 test split 和评估脚本，仅改变 Item embedding → SID 链路。四个结果均为 7,974 条测试样本、20-beam Trie constrained decoding。
 
-| 模型 | HR@10 | NDCG@10 | Coverage | Tail HR@10 | Invalid SID Rate |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Text-SID + SFT | 0.005850 | 0.002644 | 0.044044 | 0.002247 | 0.0 |
-| Text-SID + GRPO | 0.008190 | 0.004788 | 0.046046 | 0.004494 | 0.0 |
-| MM-SID + SFT | 0.010140 | 0.005374 | 0.039039 | 0.009112 | 0.0 |
-| MM-SID + GRPO | 0.007020 | 0.003957 | 0.042042 | 0.006834 | 0.0 |
+| 模型 | HR@5 | HR@10 | HR@20 | NDCG@5 | NDCG@10 | NDCG@20 | Coverage | Tail HR@10 | Invalid SID Rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Text-SID + SFT | 0.000878 | 0.001129 | 0.003261 | 0.000566 | 0.000641 | 0.001181 | 0.006806 | 0.000627 | 0.0 |
+| Text-SID + GRPO | 0.000627 | 0.001379 | 0.003762 | 0.000325 | 0.000554 | 0.001171 | 0.004671 | 0.001046 | 0.0 |
+| MM-SID + SFT | 0.000251 | 0.001630 | 0.007775 | 0.000103 | 0.000530 | 0.002067 | 0.006940 | 0.000418 | 0.0 |
+| MM-SID + GRPO | 0.000376 | 0.002508 | 0.007650 | 0.000160 | 0.000830 | 0.002129 | 0.004137 | 0.000418 | 0.0 |
 
-pilot 的原始 metrics 文件位于 `outputs/eval_full/`，统一汇总位于 [`results/summary.csv`](results/summary.csv)。由于该 pilot 使用 5 个 beam，`HR@5/10/20` 在这组配置下数值相同；评估脚本仍保留完整的 K 值字段，便于后续扩大候选数后直接复用。
+逐桶的 `HR@10`、`NDCG@10`、样本数以及完整浮点数保存在 [`results/summary.csv`](results/summary.csv)。原始预测和指标文件位于 `outputs/formal_amazon23_1m/*_predictions_k20.json` 与 `outputs/formal_amazon23_1m/*_metrics_k20.json`。
 
 ### 正式 Amazon23 表征统计
 

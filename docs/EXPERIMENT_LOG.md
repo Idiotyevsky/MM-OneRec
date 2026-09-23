@@ -63,16 +63,16 @@ Status: locally trained pipeline smoke; not a recommendation-quality comparison.
 - Text-SFT: HR@5/10/20 = 0/0/0; NDCG@5/10/20 = 0/0/0; coverage = 0.02803; invalid SID rate = 0.0.
 - MM-SFT: HR@5/10/20 = 0.03125/0.03125/0.03125; NDCG@5/10/20 = 0.0234375/0.0234375/0.0234375; coverage = 0.02302; invalid SID rate = 0.0.
 - Long-tail HR@10: Text = head/mid/tail 0/0/0; MM = 0.04/0.03448/0.0.
-- These are 64-sample smoke results and must not be described as a stable multimodal lift. The full small-subset test evaluation is recorded below.
+- These are 64-sample smoke results and must not be described as a stable multimodal lift. The formal full-test evaluation is recorded below.
 
-### Full 1k-item small-subset test evaluation
+### Formal full Amazon23 test evaluation
 
-- Test split: 2,564 users, one held-out target per user; all four checkpoints generated exactly 5 candidates per user with 5-beam Trie decoding and max 8 new tokens. Because the run used 5 beams, HR@5/10/20 are numerically identical; the summary CSV still records all requested K values.
-- Text-SFT: HR@5/10/20 = 0.005850/0.005850/0.005850; NDCG@5/10/20 = 0.002644/0.002644/0.002644; coverage = 0.044044; tail HR@10 = 0.002247; invalid SID rate = 0.0.
-- Text-GRPO (stable 4-step run): HR@5/10/20 = 0.008190/0.008190/0.008190; NDCG@5/10/20 = 0.004788/0.004788/0.004788; coverage = 0.046046; tail HR@10 = 0.004494; invalid SID rate = 0.0.
-- MM-SFT: HR@5/10/20 = 0.010140/0.010140/0.010140; NDCG@5/10/20 = 0.005374/0.005374/0.005374; coverage = 0.039039; tail HR@10 = 0.009112; invalid SID rate = 0.0.
-- MM-GRPO (stable 4-step run): HR@5/10/20 = 0.007020/0.007020/0.007020; NDCG@5/10/20 = 0.003957/0.003957/0.003957; coverage = 0.042042; tail HR@10 = 0.006834; invalid SID rate = 0.0.
-- MM-SID is higher than Text-SID under SFT on this fixed small subset, while the short MM-GRPO run is lower than MM-SFT. These are local observations from tiny checkpoints, not causal or generalizable improvement claims.
+- Protocol: Amazon23 `Industrial_and_Scientific_1m`, 7,974 test rows, one held-out target per row, `num_beams=20`, Trie constrained decoding, `max_new_tokens=8`, and the same evaluator for all four checkpoints.
+- Text-SFT: HR@5/10/20 = 0.000878/0.001129/0.003261; NDCG@5/10/20 = 0.000566/0.000641/0.001181; coverage = 0.006806; tail HR@10 = 0.000627; invalid SID rate = 0.0.
+- Text-GRPO: HR@5/10/20 = 0.000627/0.001379/0.003762; NDCG@5/10/20 = 0.000325/0.000554/0.001171; coverage = 0.004671; tail HR@10 = 0.001046; invalid SID rate = 0.0.
+- MM-SFT: HR@5/10/20 = 0.000251/0.001630/0.007775; NDCG@5/10/20 = 0.000103/0.000530/0.002067; coverage = 0.006940; tail HR@10 = 0.000418; invalid SID rate = 0.0.
+- MM-GRPO: HR@5/10/20 = 0.000376/0.002508/0.007650; NDCG@5/10/20 = 0.000160/0.000830/0.002129; coverage = 0.004137; tail HR@10 = 0.000418; invalid SID rate = 0.0.
+- Full precision metrics, head/mid/tail buckets, predictions, and configs are recorded in `results/summary.csv` and `outputs/formal_amazon23_1m/`.
 
 ### GRPO diagnosis and corrected smoke
 

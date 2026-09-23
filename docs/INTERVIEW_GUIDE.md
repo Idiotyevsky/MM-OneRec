@@ -124,4 +124,4 @@ HR 衡量召回到没有；NDCG 同时反映排序位置。两个指标一起报
 
 ## 建议的两分钟项目讲法
 
-先说边界：原仓库主线完整但 SID 实际是文本侧，而且随附大文件不完整。然后说改造：冻结视觉 encoder、可靠图片缓存、缺图 mask、简单可解释融合，保持后面的 RQ/SFT/GRPO/Trie 不变。最后说验证：20-item 离线 smoke 与全仓库测试已通过，并在 Amazon23 Industrial_and_Scientific 的 1k-item small subset 上完成 Text/MM SID、SFT、稳定版 GRPO 和完整 test split 评估；结果仅作为本地小规模闭环，重点观察 collision、invalid rate 和 tail HR/NDCG。初始 GRPO 因 warmup 导致学习率为 0，已通过逐张量比较确认并修复。
+先说边界：原仓库主线完整但 SID 实际是文本侧，而且随附大文件不完整。然后说改造：冻结视觉 encoder、可靠图片缓存、缺图 mask、简单可解释融合，保持后面的 RQ/SFT/GRPO/Trie 不变。最后说验证：20-item 离线 smoke 与全仓库测试已通过，并在 Amazon23 Industrial_and_Scientific_1m 的 7,493-item、7,974-row full test split 上用同一 20-beam evaluator 完成 Text/MM SID、SFT 和 GRPO 评估，统一记录 collision、invalid rate、HR/NDCG、coverage 与 tail HR/NDCG。初始 GRPO 因 warmup 导致学习率为 0，已通过逐张量比较确认并修复。
