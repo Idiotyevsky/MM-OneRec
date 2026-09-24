@@ -1,3 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-python scripts/rl.py "$@"
+
+# Standard GRPO entry point. The historical TRL/ReReTrainer launcher is kept
+# as scripts/mm/train_legacy_grpo.sh and scripts/rl.sh.
+python -m rl.verl.run_grpo "$@"

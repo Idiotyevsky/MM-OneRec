@@ -1,0 +1,5 @@
+# Optional environment for the standard native GRPO and Qwen3-VL tracks.
+# Keep the baseline environment in requirements.txt unchanged.
+-r requirements.txt
+verl>=0.6.1
+qwen-vl-utils>=0.0.14

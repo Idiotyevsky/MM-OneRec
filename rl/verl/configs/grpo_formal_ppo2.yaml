@@ -1,0 +1,20 @@
+# Same formal protocol as grpo_formal.yaml, reusing each rollout twice.
+model_path: outputs/formal_amazon23_1m/text_sft/final_checkpoint
+train_file: data/verl/amazon23_industrial/train.parquet
+val_file: data/verl/amazon23_industrial/valid.parquet
+output_dir: outputs/verl_grpo/formal_text_ppo2
+seed: 42
+num_generations: 8
+ppo_epochs: 2
+clip_ratio: 0.2
+kl_loss_coef: 0.001
+reward_mode: hybrid
+lambda_sid: 0.6
+max_steps: -1
+train_batch_size: 64
+ppo_mini_batch_size: 64
+ppo_micro_batch_size_per_gpu: 2
+rollout_response_length: 16
+gpus_per_node: 4
+nodes: 1
+training_rollout_constraint: unconstrained_invalid_zero

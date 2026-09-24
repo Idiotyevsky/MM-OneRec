@@ -1,3 +1,8 @@
+"""Legacy group-relative RL baseline.
+
+Retained for reproducing the original MM-OneRec results. Use rl.verl.run_grpo for the standard native verl pipeline.
+"""
+
 from pathlib import Path
 import sys
 
@@ -7,15 +12,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from datasets import Dataset
-from trl import GRPOConfig, GRPOTrainer
 import random
 import numpy as np
 import torch
+GRPOConfig = GRPOTrainer = ReReTrainer = None
 from minionerec.data import D3Dataset, SidDataset, RLTitle2SidDataset, RLSeqTitle2SidDataset, RLSid2TitleDataset, RLSidhis2TitleDataset
 from torch.utils.data import ConcatDataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+try:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+except Exception:
+    AutoModelForCausalLM = AutoTokenizer = None
 import os
-from minionerec.trainer import ReReTrainer
 from minionerec.sasrec import SASRec
 from fire import Fire
 import pickle
@@ -96,6 +103,14 @@ def train(
     lr_scheduler_type: str = "cosine",
     save_strategy: str = "epoch",
 ):
+    global GRPOConfig, GRPOTrainer, ReReTrainer, AutoModelForCausalLM, AutoTokenizer
+    if GRPOConfig is None:
+        if AutoModelForCausalLM is None:
+            from transformers import AutoModelForCausalLM as _AutoModelForCausalLM, AutoTokenizer as _AutoTokenizer
+            AutoModelForCausalLM, AutoTokenizer = _AutoModelForCausalLM, _AutoTokenizer
+        from trl import GRPOConfig as _GRPOConfig, GRPOTrainer as _GRPOTrainer
+        from minionerec.trainer import ReReTrainer as _ReReTrainer
+        GRPOConfig, GRPOTrainer, ReReTrainer = _GRPOConfig, _GRPOTrainer, _ReReTrainer
     torch.backends.cuda.enable_flash_sdp(False)  
     torch.backends.cuda.enable_mem_efficient_sdp(False)
     set_seed(seed)

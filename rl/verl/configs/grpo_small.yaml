@@ -1,0 +1,22 @@
+# MM-OneRec standard GRPO smoke configuration.
+# These keys are consumed by rl.verl.run_grpo, which translates them to the
+# native verl.trainer.main_ppo Hydra configuration.
+model_path: outputs/formal_amazon23_1m/text_sft/final_checkpoint
+train_file: data/verl/smoke/train.parquet
+val_file: data/verl/smoke/valid.parquet
+output_dir: outputs/verl_grpo/smoke
+seed: 42
+num_generations: 4
+ppo_epochs: 1
+clip_ratio: 0.2
+kl_loss_coef: 0.001
+reward_mode: hybrid
+lambda_sid: 0.6
+max_steps: 4
+train_batch_size: 8
+ppo_mini_batch_size: 8
+ppo_micro_batch_size_per_gpu: 2
+rollout_response_length: 16
+gpus_per_node: 1
+nodes: 1
+training_rollout_constraint: unconstrained_invalid_zero

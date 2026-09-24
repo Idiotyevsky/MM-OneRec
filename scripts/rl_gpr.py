@@ -1,3 +1,5 @@
+"""Legacy GPR/TRL compatibility entry point; see rl.verl for standard GRPO."""
+
 from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
 import random

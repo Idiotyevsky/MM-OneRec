@@ -121,7 +121,9 @@ class RepeatRandomSampler(Sampler):
 
 class ReReTrainer(Trainer):
     """
-    Trainer for the Group Relative Policy Optimization (GRPO) method adapted to recommendation. This algorithm was initially proposed in the
+    Legacy group-relative recommendation trainer retained for baseline reproducibility. It is not the standard verl GRPO implementation: its policy term uses a detached self-ratio and does not expose a true pi_theta/pi_old clipped surrogate. Use rl/verl/run_grpo.sh for standard GRPO.
+
+    This algorithm was initially proposed in the
     paper [DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models](https://huggingface.co/papers/2402.03300).
 
     Example:

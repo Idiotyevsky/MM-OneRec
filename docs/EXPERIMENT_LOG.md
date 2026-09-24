@@ -1,88 +1,121 @@
 # Experiment Log
 
-## 2026-09-22 — Amazon23 real-data pipeline validation
+This file records provenance for the current MM-OneRec implementation.  The
+previous log is preserved in
+[`EXPERIMENT_LOG_LEGACY.md`](EXPERIMENT_LOG_LEGACY.md).
 
-Status: pipeline validation only; not a recommendation-quality experiment.
+## 2026-09-24 — implementation audit and representation/RL refactor
 
-### Data
+### Base revision and data
 
-- Source: McAuley Lab Amazon Reviews 2023, `Industrial_and_Scientific`.
-- Raw files: 2.347 GB reviews and 1.130 GB metadata, downloaded from the publisher's Hugging Face repository.
-- Small input: first 200,000 reviews, iterative 5-core.
-- Output: 28 users, 18 items, 202 interactions; train/valid/test = 139/17/18.
+- Base Git revision: `7de8e7e` (`Update comparable full-test evaluation results`).
+- Dataset protocol: Amazon Reviews 2023, `Industrial_and_Scientific_1m` for
+  the preserved formal artifacts; local smoke conversion also uses the
+  repository's Amazon interaction CSV schema.
+- Existing formal test split: 7,974 rows, 7,493 catalog items, 20-beam Trie
+  evaluation, `max_new_tokens=8`.
+- Seed for new smoke/config defaults: 42.
 
-### Multimodal encoding
+### Audit of the actual baseline chain
 
-- Encoder: `google/siglip-base-patch16-224`, frozen.
-- Text: title + description through SigLIP text tower.
-- Image: first valid Amazon product image through SigLIP vision tower.
-- Download: 17 valid, 1 missing, 0 terminal failures.
-- Text/image shape: `[18, 768]` / `[18, 768]`.
-- Fusion: L2-normalized weighted sum, alpha = 0.7; output `[18, 768]`.
+```text
+Amazon interaction/item metadata
+  -> SigLIP text/image (or existing text embedding)
+  -> RQ-VAE / RQ-KMeans Semantic ID
+  -> scripts/sft.py (Qwen generator)
+  -> scripts/rl.py + minionerec/trainer.py (legacy group-relative RL)
+  -> minionerec/logit_processor.py Trie constrained evaluation
+  -> scripts/evaluate.py / scripts/mm/evaluate_metrics.py
+```
 
-### Semantic ID
+The old trainer computes a detached self-ratio in its policy term.  It is
+therefore retained and labelled `legacy_group_relative_rl`; it is not used as
+the implementation of standard old-policy clipped GRPO.
 
-- Method: existing RQ-VAE.
-- Smoke parameters: 50 epochs, codebooks 8/8/8, latent dimension 32.
-- Best reconstruction loss: 0.0005615.
-- Total items: 18; unique SID: 11; collisions: 7; collision rate: 38.89%.
+### New code paths
 
-This collision rate is not representative: the run deliberately uses only 18 items and a tiny training schedule. No HR/NDCG or multimodal improvement claim is made.
+- `multimodal/qwen3_vl_encoder.py`: frozen Qwen3-VL joint item encoding,
+  `last_token`/`text_mean` pooling, missing-image text-only path, `none`/`pca`
+  projection, item-order and `has_image` sidecars.
+- `multimodal/rec_alignment.py`: frozen-VLM, train-only next-item InfoNCE
+  projector for `Qwen3VL-RecAlign-SID`.
+- `rl/verl/prepare_data.py`: interaction CSV to parquet with prompt,
+  history/target SID and item IDs; embeddings are not duplicated.
+- `rl/verl/reward.py`: `exact`, `sid_hier`, `semantic`, `hybrid` rewards;
+  `<d_n>` is excluded from semantic RQ-layer scoring.
+- `rl/verl/run_grpo.py`: native `verl.trainer.main_ppo` launcher with
+  `algorithm.adv_estimator=grpo`, rollout group size, `ppo_epochs`, clip ratio,
+  actor-side KL and custom reward hook.
+- `rl/verl/grpo_math.py`: CPU diagnostic implementation of ratio/clipping, not
+  a replacement for the native trainer.
 
-## 2026-09-22 — 1k-item multimodal and SFT smoke
+### Runtime validation
 
-Status: locally trained pipeline smoke; not a recommendation-quality comparison.
+| Check | Command | Result |
+|---|---|---|
+| New CLI help | `python -m multimodal.qwen3_vl_encoder --help` and corresponding alignment/verl commands | passed |
+| Real-data parquet smoke | `python -m rl.verl.prepare_data ... --max-samples 4` | 4 rows; all required columns present |
+| New CPU tests | `python -m pytest -q tests/test_rl_reward.py tests/test_qwen3vl_encoder.py tests/test_verl_pipeline.py tests/test_rec_alignment.py` | 10 passed |
+| Full suite | `python -m pytest -q` | 56 passed, 3 skipped |
+| verl launcher dry run | `python -m rl.verl.run_grpo --config rl/verl/configs/grpo_small.yaml --dry-run` | native command emitted |
 
-### Data and images
+### New-track execution status
 
-- Parsed the first 1,000,000 Amazon23 reviews with iterative 5-core: 11,668 users, 7,493 items, 91,403 interactions.
-- Deterministic dense subset: 2,564 users, 999 items, 17,073 interactions.
-- Image cache: 967 valid images, 32 items without a usable URL, 0 terminal download failures.
-- Frozen SigLIP text/image embeddings and weighted multimodal embedding all have shape `[999, 768]`; alpha = 0.7.
+The current environment reports `verl` unavailable.  In addition, the local
+Transformers/Torch combination cannot import Qwen3-VL's model class because it
+lacks the required `torch.distributed.tensor.DTensor` API.  The Qwen3-VL path
+is tested with a CPU mock, but no real Qwen3-VL embedding, RQ model, SFT,
+native-verl GRPO checkpoint or metric is claimed in this revision.  The
+launcher exits instead of silently falling back to the legacy trainer.
 
-### Semantic ID
+| Track | SID | SFT | Native verl GRPO | Eval |
+|---|:---:|:---:|:---:---:|:---:|
+| Text baseline, preserved | ✓ | ✓ | — (legacy RL artifact) | ✓ |
+| SigLIP-MM, preserved | ✓ | ✓ | — (legacy RL artifact) | ✓ |
+| Text/SigLIP + native verl | data/launcher ready | — | not run | not run |
+| Qwen3VL-MM | encoder/mock ready | not run | not run | not run |
+| Qwen3VL-RecAlign | projector ready | not run | not run | not run |
 
-- Existing RQ-VAE, identical Text/MM configuration: 100 epochs, codebooks 32/32/32, latent dimension 64.
-- Text raw SID: 638 unique, 361 collisions, collision rate 36.14%.
-- MM raw SID: 764 unique, 235 collisions, collision rate 23.52%.
-- Deterministic `<d_n>` collision suffix: both exported catalogs contain 999 unique SIDs and 0 collisions.
-- The lower MM collision rate is a representation diagnostic only; it is not evidence of better recommendation quality.
+### Preserved formal artifacts
 
-### Qwen SFT
+The four comparable rows remain untouched under
+`outputs/formal_amazon23_1m/` and `results/summary.csv`:
 
-- Model: `Qwen/Qwen2.5-0.5B`, trained locally on one NVIDIA L40S.
-- Each run samples 64 rows from each of SidSFT, SID/item alignment, and fusion sequence tasks: 192 training examples; validation has 64 examples.
-- Common setup: one epoch, 12 optimizer steps, batch size 16, micro batch size 4, learning rate 1e-4, cutoff length 256.
-- Text-SID: train loss 4.5846, eval loss 5.3429, runtime 111.9 seconds.
-- MM-SID: train loss 4.5699, eval loss 5.1883, runtime 123.4 seconds.
-- These tiny independently sampled smoke losses must not be interpreted as an MM improvement.
+| Model | HR@10 | NDCG@10 | Coverage | Tail HR@10 | Invalid SID |
+|---|---:|---:|---:|---:|---:|
+| Text-SFT | 0.001129 | 0.000641 | 0.006806 | 0.000627 | 0.0 |
+| Text-GRPO (legacy) | 0.001379 | 0.000554 | 0.004671 | 0.001046 | 0.0 |
+| SigLIP-MM-SFT | 0.001630 | 0.000530 | 0.006940 | 0.000418 | 0.0 |
+| SigLIP-MM-GRPO (legacy) | 0.002508 | 0.000830 | 0.004137 | 0.000418 | 0.0 |
 
-### 64-sample constrained decoding smoke
+### Preserved formal-run provenance
 
-- Text-SFT and MM-SFT checkpoints each generated 64 validation/test smoke rows with 5-beam Trie decoding and max 8 new tokens.
-- Text-SFT: HR@5/10/20 = 0/0/0; NDCG@5/10/20 = 0/0/0; coverage = 0.02803; invalid SID rate = 0.0.
-- MM-SFT: HR@5/10/20 = 0.03125/0.03125/0.03125; NDCG@5/10/20 = 0.0234375/0.0234375/0.0234375; coverage = 0.02302; invalid SID rate = 0.0.
-- Long-tail HR@10: Text = head/mid/tail 0/0/0; MM = 0.04/0.03448/0.0.
-- These are 64-sample smoke results and must not be described as a stable multimodal lift. The formal full-test evaluation is recorded below.
+The following fields are available for the four existing formal checkpoints:
 
-### Formal full Amazon23 test evaluation
+| Track | Dataset/split | Generator checkpoint | Prediction/metrics path | Seed | GPU/steps/wall-clock |
+|---|---|---|---|---|---|
+| Text-SFT | Amazon23 Industrial_and_Scientific_1m, 7,974 test rows | `outputs/formal_amazon23_1m/text_sft/final_checkpoint` | `outputs/formal_amazon23_1m/text_sft_predictions_k20.json`, `text_sft_metrics_k20.json` | 42 (run config) | not recorded in retained eval config |
+| Text-GRPO legacy | same | `outputs/formal_amazon23_1m/text_grpo/final_checkpoint` | `outputs/formal_amazon23_1m/text_grpo_predictions_k20.json`, `text_grpo_metrics_k20.json` | 42 (run config) | not recorded in retained eval config |
+| SigLIP-MM-SFT | same | `outputs/formal_amazon23_1m/mm_sft/final_checkpoint` | `outputs/formal_amazon23_1m/mm_sft_predictions_k20.json`, `mm_sft_metrics_k20.json` | 42 (run config) | not recorded in retained eval config |
+| SigLIP-MM-GRPO legacy | same | `outputs/formal_amazon23_1m/mm_grpo/final_checkpoint` | `outputs/formal_amazon23_1m/mm_grpo_predictions_k20.json`, `mm_grpo_metrics_k20.json` | 42 (run config) | not recorded in retained eval config |
 
-- Protocol: Amazon23 `Industrial_and_Scientific_1m`, 7,974 test rows, one held-out target per row, `num_beams=20`, Trie constrained decoding, `max_new_tokens=8`, and the same evaluator for all four checkpoints.
-- Text-SFT: HR@5/10/20 = 0.000878/0.001129/0.003261; NDCG@5/10/20 = 0.000566/0.000641/0.001181; coverage = 0.006806; tail HR@10 = 0.000627; invalid SID rate = 0.0.
-- Text-GRPO: HR@5/10/20 = 0.000627/0.001379/0.003762; NDCG@5/10/20 = 0.000325/0.000554/0.001171; coverage = 0.004671; tail HR@10 = 0.001046; invalid SID rate = 0.0.
-- MM-SFT: HR@5/10/20 = 0.000251/0.001630/0.007775; NDCG@5/10/20 = 0.000103/0.000530/0.002067; coverage = 0.006940; tail HR@10 = 0.000418; invalid SID rate = 0.0.
-- MM-GRPO: HR@5/10/20 = 0.000376/0.002508/0.007650; NDCG@5/10/20 = 0.000160/0.000830/0.002129; coverage = 0.004137; tail HR@10 = 0.000418; invalid SID rate = 0.0.
-- Full precision metrics, head/mid/tail buckets, predictions, and configs are recorded in `results/summary.csv` and `outputs/formal_amazon23_1m/`.
+These are evaluation artifacts; no new native-verl training provenance is inferred from them.
 
-### GRPO diagnosis and corrected smoke
+### Formal-run provenance template
 
-- The initial one-step run used 12 training prompts, 4 evaluation prompts, 2 candidates per prompt, `warmup_ratio=0.03`, and cosine scheduling. Its first logged learning rate was `0.0`; a safetensors comparison found all 290 shared tensors identical between each SFT checkpoint and its GRPO checkpoint. Therefore the earlier identical SFT/GRPO metrics were caused by a no-op update, not by a meaningful GRPO result.
-- The script now exposes and records `warmup_ratio`, `lr_scheduler_type`, and `save_strategy`. The corrected run used `warmup_ratio=0`, `learning_rate=1e-6`, cosine scheduling, 4 optimizer steps, 12 prompts, 2 candidates, ranking reward, and `beta=0.04`. Text/MM each changed all 290 shared tensors; train KL was about 0.00062/0.00009 and invalid SID rate remained 0.0 at test time.
-- The corrected run verifies that GRPO updates and the downstream constrained-decoding evaluation are connected. Four steps are still a smoke-scale experiment; no stable GRPO gain is claimed.
+Every future Qwen3-VL or native-verl run must add a dated entry containing:
 
-### Environment findings
-
-- Repository-provided Qwen weight is a placeholder and bundled CSV/NPY assets are truncated.
-- Base Python environment has incompatible Torch/torchao/torchaudio packages.
-- SigLIP and RQ were therefore run with the existing `/home/zfs01/jiangjr/envs/opd` environment.
-- Missing runtime dependencies found in the original RQ scripts: scikit-learn and polars; both are now declared.
+```text
+git commit:
+dataset/category and split:
+representation model and pooling:
+RQ config/checkpoint:
+generator checkpoint:
+verl version:
+seed:
+GPU(s):
+training steps / ppo_epochs / rollout.n:
+wall-clock:
+checkpoint path:
+metrics path:
+```
