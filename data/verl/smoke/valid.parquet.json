@@ -1,0 +1,21 @@
+{
+  "rows": 8,
+  "columns": [
+    "prompt",
+    "target_sid",
+    "target_sid_parts",
+    "target_item_id",
+    "history_sid",
+    "history_item_ids",
+    "dataset",
+    "category",
+    "data_source",
+    "reward_model",
+    "extra_info"
+  ],
+  "source": "data/sid/amazon23_1m/Industrial_and_Scientific_1m.text.valid.csv",
+  "dataset": "Amazon23",
+  "category": "Industrial_and_Scientific",
+  "seed": 43,
+  "prompt_template": "User history semantic IDs:\n{history_sid}\nPredict the next item semantic ID."
+}

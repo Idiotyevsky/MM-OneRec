@@ -102,23 +102,36 @@ class RecommendationReward:
         item_ids = json.loads(Path(config.item_ids_path).read_text(encoding="utf-8")) if config.item_ids_path else list(index.keys())
         return cls(config, index=index, embeddings=embeddings, item_ids=item_ids)
 
-    def score(self, predicted_sid: object, target_sid: object, target_item_id: str | None = None) -> float:
+    def components(self, predicted_sid: object, target_sid: object, target_item_id: str | None = None) -> dict[str, float]:
+        """Return auditable exact/hierarchical/semantic/final reward pieces."""
         predicted = normalize_sid(predicted_sid)
         target = normalize_sid(target_sid)
-        if predicted == target and predicted:
-            return 1.0
-        if self.config.mode == "exact":
-            return 0.0
-        hierarchical = sid_hier_reward(predicted, target, self.config.sid_weights)
-        if self.config.mode == "sid_hier":
-            return hierarchical
+        exact = float(bool(predicted) and predicted == target)
+        hierarchical = 1.0 if exact else sid_hier_reward(predicted, target, self.config.sid_weights)
         predicted_item = self.sid_to_item.get(predicted)
         semantic = 0.0
         if self.embeddings is not None and target_item_id is not None and predicted_item is not None:
             semantic = cosine_reward(predicted_item, str(target_item_id), self.embeddings, self.item_to_index)
-        if self.config.mode == "semantic":
-            return semantic
-        return self.config.lambda_sid * hierarchical + (1.0 - self.config.lambda_sid) * semantic
+        if self.config.mode == "exact":
+            final = exact
+        elif self.config.mode == "sid_hier":
+            final = hierarchical
+        elif self.config.mode == "semantic":
+            final = semantic
+        elif exact:
+            final = 1.0
+        else:
+            final = self.config.lambda_sid * hierarchical + (1.0 - self.config.lambda_sid) * semantic
+        return {
+            "exact": float(exact),
+            "hierarchical": float(hierarchical),
+            "semantic": float(semantic),
+            "final": float(final),
+            "predicted_item_id": predicted_item,
+        }
+
+    def score(self, predicted_sid: object, target_sid: object, target_item_id: str | None = None) -> float:
+        return float(self.components(predicted_sid, target_sid, target_item_id)["final"])
 
     def __call__(self, completions: Sequence[object] | None = None, target_sid: Sequence[object] | object | None = None, target_item_id: Sequence[object] | object | None = None, solution_str: Sequence[object] | object | None = None, ground_truth: Sequence[object] | object | None = None, **_: Any) -> list[float]:
         predictions = completions if completions is not None else solution_str
@@ -156,3 +169,24 @@ def compute_reward(data_source: Any = None, solution_str: Any = None, ground_tru
     target_item = extras.get("target_item_id") if isinstance(extras, Mapping) else None
     values = reward(solution_str=solution_str, ground_truth=ground_truth, target_item_id=target_item, **kwargs)
     return values[0] if isinstance(solution_str, (str, bytes)) else values
+
+
+def _cli() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Print auditable MM-OneRec reward components for real SID artifacts.")
+    parser.add_argument("--config", type=Path, required=True, help="JSON RewardConfig with SID and embedding paths")
+    parser.add_argument("--target-sid", required=True)
+    parser.add_argument("--target-item-id", required=True)
+    parser.add_argument("--prediction", action="append", required=True, help="Prediction SID; repeat for an ordered sanity list")
+    args = parser.parse_args()
+    payload = json.loads(args.config.read_text(encoding="utf-8"))
+    reward = RecommendationReward.from_config(RewardConfig(**payload))
+    rows = []
+    for prediction in args.prediction:
+        rows.append({"prediction": prediction, **reward.components(prediction, args.target_sid, args.target_item_id)})
+    print(json.dumps(rows, indent=2))
+
+
+if __name__ == "__main__":
+    _cli()

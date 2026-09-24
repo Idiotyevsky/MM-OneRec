@@ -182,6 +182,10 @@ class Qwen3VLItemEncoder:
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
         self._image_ids = _image_token_ids(self.model, self.processor)
+        # Lightweight diagnostics from the last real preprocessing/model
+        # batch. These are persisted next to the embedding artifact.
+        self.last_batch_debug: dict[str, Any] = {}
+        self.batch_debug_history: list[dict[str, Any]] = []
 
     @staticmethod
     def _dtype(name: str) -> torch.dtype | str:
@@ -193,38 +197,116 @@ class Qwen3VLItemEncoder:
             return torch.float32
         return torch.bfloat16
 
-    def _encode_batch(self, texts: Sequence[str], image_paths: Sequence[str | None]) -> torch.Tensor:
-        has_images = any(path is not None for path in image_paths)
-        images: list[Image.Image] = []
+    @staticmethod
+    def _message(prompt: str, image_path: str | None) -> list[dict[str, Any]]:
+        """Build the official Qwen-VL message for one item."""
+        content: list[dict[str, Any]] = []
+        if image_path is not None:
+            content.append({"type": "image", "image": Path(image_path).resolve().as_uri()})
+        content.append({"type": "text", "text": prompt})
+        return [{"role": "user", "content": content}]
+
+    def _official_batch(self, texts: Sequence[str], image_paths: Sequence[str | None]) -> Any:
+        """Create model inputs through Qwen3-VL's supported API."""
+        if not hasattr(self.processor, "apply_chat_template"):
+            # Dependency-light unit-test mocks do not expose chat templates.
+            # This compatibility path is never used by a real Qwen3-VL
+            # processor, which always takes the official branch below.
+            images = None
+            opened: list[Image.Image] = []
+            try:
+                if any(path is not None for path in image_paths):
+                    if not all(path is not None for path in image_paths):
+                        raise ValueError("mock batches must contain all images or no images")
+                    opened = [Image.open(str(path)).convert("RGB") for path in image_paths]
+                    images = opened
+                return self.processor(text=list(texts), images=images, padding=True, return_tensors="pt")
+            finally:
+                for image in opened:
+                    image.close()
+
+        messages = [self._message(text, path) for text, path in zip(texts, image_paths, strict=True)]
+        rendered = [
+            self.processor.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for conversation in messages
+        ]
+        patch_size = int(getattr(getattr(self.processor, "image_processor", None), "patch_size", 14) or 14)
+        image_inputs = video_inputs = None
+        video_kwargs: dict[str, Any] = {}
+        if any(path is not None for path in image_paths):
+            try:
+                from qwen_vl_utils import process_vision_info
+            except ImportError as exc:  # pragma: no cover - environment-specific
+                raise RuntimeError("Qwen3-VL image preprocessing requires qwen-vl-utils") from exc
+            image_inputs, video_inputs, video_kwargs = process_vision_info(
+                messages,
+                return_video_kwargs=True,
+                return_video_metadata=True,
+                image_patch_size=patch_size,
+            )
+        kwargs: dict[str, Any] = {
+            "text": rendered,
+            "images": image_inputs,
+            "videos": video_inputs,
+            "padding": True,
+            "return_tensors": "pt",
+            **video_kwargs,
+        }
+        # process_vision_info prepares visual inputs in current Qwen3-VL
+        # releases. Keep a fallback for older processors.
         try:
-            if has_images and not all(path is not None for path in image_paths):
-                raise ValueError("A batch must contain either all images or no images")
-            if has_images:
-                images = [Image.open(str(path)).convert("RGB") for path in image_paths]
-                batch = self.processor(text=list(texts), images=images, padding=True, return_tensors="pt")
-            else:
-                batch = self.processor(text=list(texts), padding=True, return_tensors="pt")
-            batch = _to_device(batch, self.device)
-            with torch.inference_mode():
-                outputs = self.model(**batch, output_hidden_states=True, return_dict=True)
-            hidden = _last_hidden(outputs)
-            attention = batch.get("attention_mask") if isinstance(batch, dict) else getattr(batch, "attention_mask", None)
-            if attention is None:
-                attention = torch.ones(hidden.shape[:2], dtype=torch.long, device=hidden.device)
-            if self.config.pooling == "last_token":
-                pooled = pool_last_token(hidden, attention)
-            else:
-                text_mask = None
-                input_ids = batch.get("input_ids") if isinstance(batch, dict) else getattr(batch, "input_ids", None)
-                if input_ids is not None and self._image_ids:
-                    text_mask = torch.ones_like(attention, dtype=torch.bool)
-                    for image_id in self._image_ids:
-                        text_mask &= input_ids != image_id
-                pooled = pool_text_mean(hidden, attention, text_mask)
-            return pooled.float().cpu()
-        finally:
-            for image in images:
-                image.close()
+            batch = self.processor(do_resize=False, **kwargs)
+        except TypeError:
+            batch = self.processor(**kwargs)
+        self.last_batch_debug = {
+            "preprocessing": "qwen3_vl_messages_process_vision_info",
+            "batch_size": len(messages),
+            "has_image_count": int(sum(path is not None for path in image_paths)),
+            "rendered_text_lengths": [len(value) for value in rendered],
+        }
+        return batch
+
+    def _encode_batch(self, texts: Sequence[str], image_paths: Sequence[str | None]) -> torch.Tensor:
+        if len(texts) != len(image_paths):
+            raise ValueError("texts and image_paths must have identical length")
+        batch = self._official_batch(texts, image_paths)
+        batch = _to_device(batch, self.device)
+        with torch.inference_mode():
+            outputs = self.model(**batch, output_hidden_states=True, return_dict=True)
+        hidden = _last_hidden(outputs)
+        attention = batch.get("attention_mask") if isinstance(batch, dict) else getattr(batch, "attention_mask", None)
+        if attention is None:
+            attention = torch.ones(hidden.shape[:2], dtype=torch.long, device=hidden.device)
+        input_ids = batch.get("input_ids") if isinstance(batch, dict) else getattr(batch, "input_ids", None)
+        image_token_count = 0
+        if input_ids is not None and self._image_ids:
+            image_token_count = int(sum(int((input_ids == token_id).sum()) for token_id in self._image_ids))
+        positions = attention.long().sum(dim=1).sub(1).clamp_min(0).detach().cpu().tolist()
+        self.last_batch_debug.update(
+            {
+                "input_ids_shape": list(input_ids.shape) if input_ids is not None else None,
+                "attention_mask_shape": list(attention.shape),
+                "visual_keys": [key for key in ("pixel_values", "image_grid_thw", "pixel_values_videos") if key in batch],
+                "image_token_count": image_token_count,
+                "last_valid_token_positions": [int(value) for value in positions],
+                "hidden_shape": list(hidden.shape),
+            }
+        )
+        self.batch_debug_history.append(dict(self.last_batch_debug))
+        if self.config.pooling == "last_token":
+            pooled = pool_last_token(hidden, attention)
+        else:
+            text_mask = None
+            if input_ids is not None and self._image_ids:
+                text_mask = torch.ones_like(attention, dtype=torch.bool)
+                for image_id in self._image_ids:
+                    text_mask &= input_ids != image_id
+            pooled = pool_text_mean(hidden, attention, text_mask)
+        return pooled.float().cpu()
 
     def encode_records(
         self,
@@ -235,20 +317,26 @@ class Qwen3VLItemEncoder:
         if len(records) != len(image_paths):
             raise ValueError("records and image_paths must have identical length")
         texts = [build_item_prompt(record, self.config.include_optional) for record in records]
+        self.batch_debug_history = []
         output: list[torch.Tensor | None] = [None] * len(records)
         groups = {
             True: [idx for idx, path in enumerate(image_paths) if path is not None],
             False: [idx for idx, path in enumerate(image_paths) if path is None],
         }
-        for has_image, indices in groups.items():
-            for start in range(0, len(indices), max(1, self.config.batch_size)):
-                batch_indices = indices[start : start + self.config.batch_size]
-                vectors = self._encode_batch(
-                    [texts[idx] for idx in batch_indices],
-                    [image_paths[idx] for idx in batch_indices] if has_image else [None] * len(batch_indices),
-                )
-                for idx, vector in zip(batch_indices, vectors, strict=True):
-                    output[idx] = vector
+        progress = tqdm(total=len(records), desc="Qwen3-VL encode", unit="item")
+        try:
+            for has_image, indices in groups.items():
+                for start in range(0, len(indices), max(1, self.config.batch_size)):
+                    batch_indices = indices[start : start + self.config.batch_size]
+                    vectors = self._encode_batch(
+                        [texts[idx] for idx in batch_indices],
+                        [image_paths[idx] for idx in batch_indices] if has_image else [None] * len(batch_indices),
+                    )
+                    for idx, vector in zip(batch_indices, vectors, strict=True):
+                        output[idx] = vector
+                    progress.update(len(batch_indices))
+        finally:
+            progress.close()
         if any(vector is None for vector in output):
             raise RuntimeError("Qwen3-VL failed to produce an embedding for an item")
         matrix = torch.stack([vector for vector in output if vector is not None]).numpy().astype(np.float32)
@@ -315,6 +403,8 @@ def encode_item_json(
         "shape": list(matrix.shape),
         "has_image_count": int(has_image.sum()),
         "missing_image_count": int((~has_image).sum()),
+        "preprocessing_debug": encoder.last_batch_debug,
+        "preprocessing_batches": encoder.batch_debug_history,
         "item_path": str(item_path),
         "manifest_path": str(manifest_path),
         **projection_info,

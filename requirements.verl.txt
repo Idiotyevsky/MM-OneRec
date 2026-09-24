@@ -1,5 +1,16 @@
-# Optional environment for the standard native GRPO and Qwen3-VL tracks.
-# Keep the baseline environment in requirements.txt unchanged.
+# Dedicated environment used for the verified native verl GRPO and Qwen3-VL
+# smoke runs. Keep the baseline environment in requirements.txt unchanged.
+# The Torch wheels used in the verified environment are CUDA 12.4 builds.
 -r requirements.txt
-verl>=0.6.1
-qwen-vl-utils>=0.0.14
+torch==2.6.0
+torchvision==0.21.0
+transformers==4.57.1
+verl==0.6.1
+vllm==0.8.5.post1
+ray==2.43.0
+uvicorn==0.30.6
+qwen-vl-utils==0.0.14
+numpy==1.26.3
+accelerate==1.10.1
+peft==0.21.0
+trl==0.24.0

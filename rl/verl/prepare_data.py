@@ -27,7 +27,23 @@ def parse_list(value: object) -> list[str]:
 
 
 def make_prompt(history_sid: list[str], template: str) -> list[dict[str, str]]:
-    content = template.format(history_sid=" ".join(history_sid), history=" ".join(history_sid))
+    """Build a verl message containing the exact existing SFT prompt text.
+
+    verl 0.6.1 expects ``prompt`` to be a list of chat messages, but the
+    checkpoint in this repository was trained on the plain-text instruction
+    template below.  The launcher supplies an identity chat template, so the
+    message content is passed to the tokenizer without adding another system
+    or assistant wrapper.
+    """
+    user_input = template.format(history_sid=" ".join(history_sid), history=" ".join(history_sid))
+    content = (
+        "Below is an instruction that describes a task, paired with an input that provides further context. \n\n"
+        "### Instruction:\n"
+        "Can you predict the next possible item that the user may expect?\n\n"
+        "### User Input: \n"
+        f"{user_input}\n\n"
+        "### Response:\n"
+    )
     return [{"role": "user", "content": content}]
 
 
@@ -37,7 +53,7 @@ def convert_csv_to_parquet(
     *,
     dataset: str = "Amazon23",
     category: str = "Industrial_and_Scientific",
-    prompt_template: str = "User history semantic IDs:\n{history_sid}\nPredict the next item semantic ID.",
+    prompt_template: str = "The user has interacted with items {history_sid} in chronological order. Can you predict the next possible item that the user may expect?",
     max_samples: int | None = None,
     seed: int = 42,
 ) -> dict[str, Any]:
@@ -100,7 +116,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--dataset", default="Amazon23")
     parser.add_argument("--category", default="Industrial_and_Scientific")
-    parser.add_argument("--prompt-template", default="User history semantic IDs:\n{history_sid}\nPredict the next item semantic ID.")
+    parser.add_argument("--prompt-template", default="The user has interacted with items {history_sid} in chronological order. Can you predict the next possible item that the user may expect?")
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()

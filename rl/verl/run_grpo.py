@@ -55,20 +55,38 @@ def build_overrides(config: dict[str, Any], reward_path: Path, reward_config_pat
         _override("data.max_prompt_length", config.get("max_prompt_length", 512)),
         _override("data.max_response_length", config.get("rollout_response_length", 16)),
         _override("actor_rollout_ref.model.path", str(model_path.resolve())),
+        _override("+actor_rollout_ref.model.override_config.attn_implementation", config.get("attn_implementation", "sdpa")),
         _override("actor_rollout_ref.rollout.name", "vllm"),
+        _override("actor_rollout_ref.rollout.tensor_model_parallel_size", config.get("tensor_model_parallel_size", 1)),
         _override("actor_rollout_ref.rollout.n", config.get("num_generations", 8)),
         _override("actor_rollout_ref.rollout.response_length", config.get("rollout_response_length", 16)),
+        _override(
+            "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu",
+            config.get(
+                "rollout_log_prob_micro_batch_size_per_gpu",
+                config.get("ppo_micro_batch_size_per_gpu", 2),
+            ),
+        ),
+        _override("actor_rollout_ref.actor.use_torch_compile", config.get("use_torch_compile", False)),
         _override("actor_rollout_ref.actor.ppo_epochs", config.get("ppo_epochs", 1)),
         _override("actor_rollout_ref.actor.ppo_mini_batch_size", config.get("ppo_mini_batch_size", 64)),
         _override("actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu", config.get("ppo_micro_batch_size_per_gpu", 2)),
+        # Current verl releases validate reference-policy log-prob batching
+        # independently from the actor micro-batch size.
+        _override(
+            "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu",
+            config.get(
+                "ref_log_prob_micro_batch_size_per_gpu",
+                config.get("ppo_micro_batch_size_per_gpu", 2),
+            ),
+        ),
         _override("actor_rollout_ref.actor.clip_ratio", config.get("clip_ratio", 0.2)),
         _override("actor_rollout_ref.actor.use_kl_loss", True),
         _override("actor_rollout_ref.actor.kl_loss_coef", config.get("kl_loss_coef", 1e-3)),
-        _override("actor_rollout_ref.actor.calculate_entropy", True),
         _override("algorithm.adv_estimator", "grpo"),
         _override("algorithm.use_kl_in_reward", False),
-        _override("reward.custom_reward_function.path", str(reward_path.resolve())),
-        _override("reward.custom_reward_function.name", "compute_reward"),
+        _override("custom_reward_function.path", str(reward_path.resolve())),
+        _override("custom_reward_function.name", "compute_reward"),
         _override("trainer.project_name", "MM-OneRec"),
         _override("trainer.experiment_name", config.get("experiment_name", "verl_grpo")),
         _override("trainer.default_local_dir", str(Path(str(config.get("output_dir", "outputs/verl_grpo"))).resolve())),
@@ -76,14 +94,29 @@ def build_overrides(config: dict[str, Any], reward_path: Path, reward_config_pat
         _override("trainer.n_gpus_per_node", config.get("gpus_per_node", 1)),
         _override("trainer.nnodes", config.get("nodes", 1)),
         _override("data.seed", config.get("seed", 42)),
-        _override("actor_rollout_ref.rollout.seed", config.get("seed", 42)),
         _override("trainer.logger", "['console']"),
+        # Ray 2.58 + the cluster's OpenTelemetry package can fail while
+        # starting the optional dashboard; GRPO does not depend on it.
+        _override("+ray_kwargs.ray_init.include_dashboard", False),
     ]
+    if config.get("save_freq") is not None:
+        overrides.append(_override("trainer.save_freq", config.get("save_freq")))
+    rollout_data_dir = config.get("rollout_data_dir")
+    if rollout_data_dir:
+        overrides.append(_override("trainer.rollout_data_dir", str(Path(str(rollout_data_dir)).resolve())))
+    chat_template = config.get("chat_template")
+    if chat_template:
+        overrides.append(
+            _override(
+                "+data.apply_chat_template_kwargs.chat_template",
+                json.dumps(str(chat_template)),
+            )
+        )
     max_steps = int(config.get("max_steps", -1))
     if max_steps > 0:
         overrides.append(_override("trainer.total_training_steps", max_steps))
     if reward_config_path is not None:
-        overrides.append(_override("reward.custom_reward_function.reward_kwargs.config_path", str(reward_config_path.resolve())))
+        overrides.append(_override("+custom_reward_function.reward_kwargs.config_path", str(reward_config_path.resolve())))
     return overrides
 
 
@@ -100,8 +133,14 @@ def main() -> None:
     reward_path = ROOT / "rl" / "verl" / "reward.py"
     output_dir = Path(str(config.get("output_dir", "outputs/verl_grpo"))).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
-    effective_reward_config = args.reward_config.resolve() if args.reward_config else output_dir / "reward_config.json"
-    if args.reward_config is None:
+    configured_reward_config = config.get("reward_config")
+    if args.reward_config:
+        effective_reward_config = args.reward_config.resolve()
+    elif configured_reward_config:
+        effective_reward_config = (ROOT / str(configured_reward_config)).resolve()
+    else:
+        effective_reward_config = output_dir / "reward_config.json"
+    if args.reward_config is None and not configured_reward_config:
         reward_payload = {
             "mode": config.get("reward_mode", "hybrid"),
             "lambda_sid": config.get("lambda_sid", 0.6),

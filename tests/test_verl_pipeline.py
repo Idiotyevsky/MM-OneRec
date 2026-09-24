@@ -52,3 +52,8 @@ def test_verl_parquet_schema(tmp_path: Path):
 
     table = pq.read_table(output)
     assert {"prompt", "target_sid", "target_item_id", "history_sid", "history_item_ids", "target_sid_parts", "dataset", "category"}.issubset(table.column_names)
+    prompt = table.column("prompt")[0].as_py()
+    assert isinstance(prompt, list)
+    assert prompt[0]["role"] == "user"
+    assert "### Instruction:" in prompt[0]["content"]
+    assert "### Response:" in prompt[0]["content"]
