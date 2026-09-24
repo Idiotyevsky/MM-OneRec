@@ -1,3 +1,4 @@
+import json
 import logging
 
 import numpy as np
@@ -9,6 +10,11 @@ from transformers import get_linear_schedule_with_warmup, get_constant_schedule_
 
 from utils import ensure_dir,set_color,get_local_time,delete_file
 import os
+
+try:
+    from diagnostics import compute_codebook_diagnostics
+except ImportError:  # pragma: no cover - package import path
+    from rq.diagnostics import compute_codebook_diagnostics
 
 import heapq
 class Trainer(object):
@@ -31,6 +37,15 @@ class Trainer(object):
         self.best_save_heap = []
         self.newest_save_queue = []
         self.eval_step = min(args.eval_step, self.epochs)
+        self.diagnostics_path = str(getattr(args, "diagnostics_path", "") or "")
+        self.diagnostics_batch_size = int(getattr(args, "diagnostics_batch_size", 1024))
+        self.patience = int(getattr(args, "patience", 0))
+        self.best_reconstruction = np.inf
+        self.best_reconstruction_ckpt = "best_reconstruction_model.pth"
+        if self.diagnostics_path:
+            os.makedirs(os.path.dirname(os.path.abspath(self.diagnostics_path)), exist_ok=True)
+            with open(self.diagnostics_path, "w", encoding="utf-8") as handle:
+                handle.write("")
         self.device = args.device
         self.device = torch.device(self.device)
         self.ckpt_dir = args.ckpt_dir
@@ -128,8 +143,17 @@ class Trainer(object):
     def _valid_epoch(self, valid_data):
 
         self.model.eval()
+        if self.diagnostics_path:
+            diagnostics = compute_codebook_diagnostics(
+                self.model,
+                valid_data,
+                device=self.device,
+                batch_size=self.diagnostics_batch_size,
+                num_workers=0,
+            )
+            return float(diagnostics["prefix_diversity"]["collision_rate"]), diagnostics
 
-        iter_data =tqdm(
+        iter_data = tqdm(
                 valid_data,
                 total=len(valid_data),
                 ncols=100,
@@ -148,8 +172,7 @@ class Trainer(object):
                 indices_set.add(code)
 
         collision_rate = (num_sample - len(list(indices_set)))/num_sample
-
-        return collision_rate
+        return collision_rate, None
 
     def _save_checkpoint(self, epoch, collision_rate=1, ckpt_file=None):
 
@@ -160,6 +183,7 @@ class Trainer(object):
             "epoch": epoch,
             "best_loss": self.best_loss,
             "best_collision_rate": self.best_collision_rate,
+            "best_reconstruction": self.best_reconstruction,
             "state_dict": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
         }
@@ -189,7 +213,6 @@ class Trainer(object):
         cur_eval_step = 0
 
         for epoch_idx in range(self.epochs):
-            # train
             training_start_time = time()
             train_loss, train_recon_loss = self._train_epoch(data, epoch_idx)
             training_end_time = time()
@@ -198,15 +221,36 @@ class Trainer(object):
             )
             self.logger.info(train_loss_output)
 
-
-            # eval
             if (epoch_idx + 1) % self.eval_step == 0:
                 valid_start_time = time()
-                collision_rate = self._valid_epoch(data)
+                collision_rate, diagnostics = self._valid_epoch(data)
 
                 if train_loss < self.best_loss:
                     self.best_loss = train_loss
                     self._save_checkpoint(epoch=epoch_idx, ckpt_file=self.best_loss_ckpt)
+
+                if diagnostics is not None:
+                    diagnostics.update({
+                        "epoch": int(epoch_idx),
+                        "train_loss": float(train_loss),
+                        "train_reconstruction_loss": float(train_recon_loss),
+                    })
+                    with open(self.diagnostics_path, "a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(diagnostics) + "\n")
+                    reconstruction_loss = float(diagnostics["reconstruction_loss"])
+                    if reconstruction_loss < self.best_reconstruction:
+                        self.best_reconstruction = reconstruction_loss
+                        self._save_checkpoint(epoch=epoch_idx, ckpt_file=self.best_reconstruction_ckpt)
+                    self.logger.info(
+                        "RQ diagnostics epoch %d: collision=%.6f recon=%.8f "
+                        "prefix1=%d prefix2=%d raw_unique=%d",
+                        epoch_idx,
+                        collision_rate,
+                        reconstruction_loss,
+                        diagnostics["prefix_diversity"].get("unique_prefix@1", 0),
+                        diagnostics["prefix_diversity"].get("unique_prefix@2", 0),
+                        diagnostics["prefix_diversity"].get("raw_unique_sid", 0),
+                    )
 
                 if collision_rate < self.best_collision_rate:
                     self.best_collision_rate = collision_rate
@@ -215,7 +259,6 @@ class Trainer(object):
                                           ckpt_file=self.best_collision_ckpt)
                 else:
                     cur_eval_step += 1
-
 
                 valid_end_time = time()
                 valid_score_output = (
@@ -246,10 +289,12 @@ class Trainer(object):
                     if old_save not in self.best_save_heap:
                         delete_file(old_save[1])
 
-
+                if self.patience > 0 and cur_eval_step >= self.patience:
+                    self.logger.info(
+                        "Early stopping after %d evaluation rounds without collision improvement",
+                        cur_eval_step,
+                    )
+                    break
 
         return self.best_loss, self.best_collision_rate
-
-
-
 

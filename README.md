@@ -31,12 +31,14 @@ RQ/SID, generator, split and evaluator so their effects can be separated.
 | Text baseline | existing text embedding | yes | yes | legacy RL artifact | formal artifact |
 | SigLIP-MM baseline | normalized `0.7 * text + 0.3 * image` | yes | yes | legacy RL artifact | formal artifact |
 | Text/SigLIP + native verl GRPO | same baseline representations | launcher ready | data conversion ready | requires verl run | not run in this checkout |
-| Qwen3VL-MM | frozen joint VLM representation | encoder ready | not run | not run | not run |
+| Qwen3VL-MM | frozen joint VLM representation | RQ ablation + candidate SID exported | downstream SFT not run | not run | not run |
 | Qwen3VL-RecAlign | frozen VLM + train-only projector | alignment code ready | not run | not run | not run |
 
 “Formal artifact” refers only to files already present under
-`outputs/formal_amazon23_1m/`; no Qwen3-VL or native-verl metric is inferred
-from those files.
+`outputs/formal_amazon23_1m/`; no Qwen3-VL downstream recommendation metric or
+native-verl metric is inferred from those files. Qwen3-VL RQ diagnostics and
+ablations are recorded in `docs/EXPERIMENT_LOG.md` and
+`results/rq_ablation_qwen3vl.csv`.
 
 ## 2. Representation layer
 

@@ -19,7 +19,7 @@ Trie-constrained Beam Search → HR / NDCG / Coverage / Tail
 | Text baseline | ✓ | ✓ | legacy RL | ✓ |
 | SigLIP-MM baseline | ✓ | ✓ | legacy RL | ✓ |
 | Text/SigLIP + native verl GRPO | ✓ | ✓ | launcher ready | 未运行 |
-| Qwen3VL-MM | 编码器已实现 | 未运行 | 未运行 | 未运行 |
+| Qwen3VL-MM | 编码器已完成；RQ ablation 与候选 SID 已导出 | 下游 SFT 未运行 | 未运行 | 未运行 |
 | Qwen3VL-RecAlign | 对齐代码已实现 | 未运行 | 未运行 | 未运行 |
 
 表中的正式结果只来自仓库已有 `outputs/formal_amazon23_1m/` 文件，不将旧结果代替新 track 的结果。

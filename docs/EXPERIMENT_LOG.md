@@ -214,3 +214,76 @@ wall-clock:
 checkpoint path:
 metrics path:
 ```
+
+
+## 2026-09-24 — Qwen3-VL RQ-VAE quantization diagnostics and ablation
+
+This round keeps the Qwen3-VL encoder, SFT/GRPO code, Trie evaluator, and the
+existing SID artifacts unchanged.  The fixed embedding is
+`outputs/qwen3vl/Industrial_and_Scientific_1m.qwen3vl-768.npy` (`7,493 x 768`).
+
+### Embedding diagnostics
+
+- finite values: `0` NaN/Inf; row norm mean `1.000000`, std `5.04e-8`, zero
+  rows `0`;
+- pairwise cosine sample (10,000 pairs): mean `0.002916`, std `0.206014`,
+  p05 `-0.315778`, median `-0.008079`, p95 `0.353487`, fraction above `0.999`
+  `0.0`;
+- per-dimension standard deviation ranged from `0.006703` to `0.391615`
+  (mean `0.0221887`, median `0.0137117`).  Thus the representation is not
+  collapsed, but feature scales are strongly non-uniform; the full vectors are
+  saved in `outputs/qwen3vl/embedding_diagnostics.json`.
+
+### Assignment and diagnostics protocol
+
+Every RQ evaluation uses `model.get_indices(..., use_sk=False)`, i.e. the same
+nearest-neighbor assignment used by final SID export.  Sinkhorn is only a
+training-time assignment when its configured epsilon is positive.  Each run
+writes per-evaluation JSONL to `outputs/qwen3vl/rq_ablation_qwen3vl/<run>/diagnostics.jsonl`
+and a consolidated CSV to `results/rq_ablation_qwen3vl.csv`.  The trainer now
+also saves `best_collision_model.pth` and `best_reconstruction_model.pth`; the
+main selector is minimum raw collision, not the last epoch or reconstruction
+loss alone.
+
+### Seven controlled runs
+
+All runs use seed `2024`, 100 epochs maximum, evaluation every 20 epochs,
+`32/32/32` unless noted, beta `0.25`, quantization weight `1.0`, and the same
+Qwen3-VL embedding.  The reported values below are from the best raw-collision
+checkpoint.
+
+| Run | Preprocess | Sinkhorn epsilon | Latent/codebooks | Best epoch | Recon. loss | Raw unique SID | Collision rate | Prefix@2 |
+|---|---|---:|---|---:|---:|---:|---:|---:|
+| Q0 | none | `0` | 64 / 32³ | 19 | `0.000712` | 5,124 | `0.316162` | 947 |
+| Q1 | z-score | `0` | 64 / 32³ | 19 | `0.989669` | 3,341 | `0.554117` | 550 |
+| Q2 | none | `0.001` | 64 / 32³ | 19 | `0.001299` | 46 | `0.993861` | 23 |
+| Q3 | none | `0.003` | 64 / 32³ | 19 | `0.000716` | 5,290 | `0.294008` | 964 |
+| Q4 | z-score | `0.003` | 64 / 32³ | 39 | `0.946734` | 3,892 | `0.480582` | 775 |
+| Q5 | none (selected from Q3) | `0.003` | 128 / 32³ | 19 | `0.000692` | 5,168 | `0.310290` | 941 |
+| Q6 | none (selected from Q3) | `0.003` | 128 / 64³ | 19 | `0.000658` | 6,515 | `0.130522` | 2,511 |
+
+Codebook utilization for Q0/Q3/Q5/Q6 was `100%` at every layer; Q6 had
+normalized entropy about `0.988/0.989/0.988` and perplexity about
+`60.94/61.06/60.97` out of 64.  Q2 is a clear assignment-collapse regime:
+only `11/8/7` codes were used in the three layers.  Z-score preprocessing also
+hurt this RQ setup: its reconstruction is measured in the transformed space
+and its raw collision rate is substantially worse.
+
+The best current RQ candidate is **Q6**: increasing latent/codebook capacity
+while retaining the Q3 (`epsilon=0.003`, no z-score) training assignment.  It
+reduces raw collision from the controlled Q0 `31.6162%` to `13.0522%` without
+post-hoc collision suffixes.  This is a tokenizer candidate only; it has not
+been promoted to downstream SFT/GRPO or recommendation metrics in this round.
+
+### Semantic prefix inspection
+
+Prefix examples for all candidates are stored under each analysis directory as
+`prefix_examples.json`.  Q3 and Q6 show coherent groups in sampled cases (for
+example, Q6 `<a_40>` groups caster-wheel products with centroid cosine around
+`0.905–0.918`); the examples are diagnostic evidence, not a substitute for
+HR/NDCG evaluation.
+
+The formal exporter independently reproduced the same raw statistics for the two
+selected candidates: `data/sid/amazon23_1m/Industrial_and_Scientific_1m.qwen3vl_q3.index.stats.json`
+reports 5,290 unique raw SIDs / `0.294008` collision, and the corresponding
+`qwen3vl_q6.index.stats.json` reports 6,515 / `0.130522`.

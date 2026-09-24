@@ -1,15 +1,21 @@
 import argparse
+import json
 import random
 import torch
 import numpy as np
 from time import time
 import logging
+from pathlib import Path
 
 from torch.utils.data import DataLoader
 
 from datasets import EmbDataset
 from models.rqvae import RQVAE
 from trainer import  Trainer
+try:
+    from diagnostics import fit_zscore, save_zscore_stats
+except ImportError:  # pragma: no cover - package import path
+    from rq.diagnostics import fit_zscore, save_zscore_stats
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Index")
@@ -44,6 +50,12 @@ def parse_args():
     parser.add_argument('--layers', type=int, nargs='+', default=[2048,1024,512,256,128,64], help='hidden sizes of every layer')
 
     parser.add_argument('--save_limit', type=int, default=5)
+    parser.add_argument('--seed', type=int, default=2024)
+    parser.add_argument('--preprocess', choices=['none', 'zscore'], default='none')
+    parser.add_argument('--preprocess_stats_path', type=str, default='')
+    parser.add_argument('--diagnostics_path', type=str, default='')
+    parser.add_argument('--diagnostics_batch_size', type=int, default=1024)
+    parser.add_argument('--patience', type=int, default=0, help='evaluation rounds without collision improvement; 0 disables early stopping')
     parser.add_argument("--ckpt_dir", type=str, default="", help="output directory for model")
 
     return parser.parse_args()
@@ -51,7 +63,8 @@ def parse_args():
 
 if __name__ == '__main__':
     """fix the random seed"""
-    seed = 2024
+    args = parse_args()
+    seed = args.seed
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -59,7 +72,6 @@ if __name__ == '__main__':
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    args = parse_args()
     print("=================================================")
     print(args)
     print("=================================================")
@@ -68,6 +80,24 @@ if __name__ == '__main__':
 
     """build dataset"""
     data = EmbDataset(args.data_path)
+    raw_embeddings = np.asarray(data.embeddings, dtype=np.float32)
+    args.embedding_diagnostics = {
+        "num_items": int(raw_embeddings.shape[0]),
+        "dim": int(raw_embeddings.shape[1]),
+    }
+    if args.preprocess == "zscore":
+        transformed, scaler_stats = fit_zscore(raw_embeddings)
+        data.embeddings = transformed
+        stats_path = args.preprocess_stats_path or str(Path(args.ckpt_dir) / "preprocess_stats.json")
+        args.preprocess_stats_path = stats_path
+        save_zscore_stats(scaler_stats, stats_path)
+        print(f"Applied z-score preprocessing; saved statistics to {stats_path}")
+    elif args.preprocess_stats_path:
+        Path(args.preprocess_stats_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.preprocess_stats_path).write_text(
+            json.dumps({"mode": "none", "num_items": int(raw_embeddings.shape[0]), "dim": int(raw_embeddings.shape[1])}, indent=2) + "\n",
+            encoding="utf-8",
+        )
     model = RQVAE(in_dim=data.dim,
                   num_emb_list=args.num_emb_list,
                   e_dim=args.e_dim,
