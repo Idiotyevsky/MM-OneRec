@@ -220,6 +220,22 @@ def main() -> None:
             "layers": [512, 256],
             "num_emb_list": [64, 64, 64],
         },
+        {
+            "name": "Q7_best_latent128_codebook128",
+            "preprocess": best_config["preprocess"],
+            "sk_epsilons": best_config["sk_epsilons"],
+            "e_dim": 128,
+            "layers": [512, 256],
+            "num_emb_list": [128, 128, 128],
+        },
+        {
+            "name": "Q8_best_latent128_codebook256",
+            "preprocess": best_config["preprocess"],
+            "sk_epsilons": best_config["sk_epsilons"],
+            "e_dim": 128,
+            "layers": [512, 256],
+            "num_emb_list": [256, 256, 256],
+        },
     ]
     for config in capacity:
         metrics.append(_run_one(args, config))

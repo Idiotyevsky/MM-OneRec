@@ -245,7 +245,7 @@ also saves `best_collision_model.pth` and `best_reconstruction_model.pth`; the
 main selector is minimum raw collision, not the last epoch or reconstruction
 loss alone.
 
-### Seven controlled runs
+### Nine controlled runs (Q0–Q8)
 
 All runs use seed `2024`, 100 epochs maximum, evaluation every 20 epochs,
 `32/32/32` unless noted, beta `0.25`, quantization weight `1.0`, and the same
@@ -261,29 +261,50 @@ checkpoint.
 | Q4 | z-score | `0.003` | 64 / 32³ | 39 | `0.946734` | 3,892 | `0.480582` | 775 |
 | Q5 | none (selected from Q3) | `0.003` | 128 / 32³ | 19 | `0.000692` | 5,168 | `0.310290` | 941 |
 | Q6 | none (selected from Q3) | `0.003` | 128 / 64³ | 19 | `0.000658` | 6,515 | `0.130522` | 2,511 |
+| Q7 | none (selected from Q3) | `0.003` | 128 / 128³ | 19 | `0.000628` | 7,075 | `0.055785` | 4,345 |
+| Q8 | none (selected from Q3) | `0.003` | 128 / 256³ | 19 | `0.000611` | 7,261 | `0.030962` | 5,535 |
 
-Codebook utilization for Q0/Q3/Q5/Q6 was `100%` at every layer; Q6 had
-normalized entropy about `0.988/0.989/0.988` and perplexity about
-`60.94/61.06/60.97` out of 64.  Q2 is a clear assignment-collapse regime:
+Codebook utilization for Q0/Q3/Q5/Q6 was `100%` at every layer.  Q7
+kept `128/128/128` active codes, normalized entropy `0.9896/0.9922/0.9912`,
+and perplexity `121.69/123.23/122.65` out of 128.  Q8 used `256/256/249`
+codes, normalized entropy `0.9866/0.9884/0.9792`, and perplexity
+`237.61/240.02/228.09` out of 256; its third layer is the first capacity run
+with a small unused-code tail.  Q2 remains a clear assignment-collapse regime:
 only `11/8/7` codes were used in the three layers.  Z-score preprocessing also
 hurt this RQ setup: its reconstruction is measured in the transformed space
 and its raw collision rate is substantially worse.
 
-The best current RQ candidate is **Q6**: increasing latent/codebook capacity
-while retaining the Q3 (`epsilon=0.003`, no z-score) training assignment.  It
-reduces raw collision from the controlled Q0 `31.6162%` to `13.0522%` without
-post-hoc collision suffixes.  This is a tokenizer candidate only; it has not
-been promoted to downstream SFT/GRPO or recommendation metrics in this round.
+With the fixed Q3 training assignment (`epsilon=0.003`, no z-score), increasing
+capacity gives a smooth RQ-only trade-off: Q6 reaches `13.0522%` collision, Q7
+reaches `5.5785%`, and Q8 reaches `3.0962%`.  Q7 improves reconstruction from
+`0.0006579` (Q6) to `0.0006279`; Q8 reaches `0.0006112`.  Collision is selected
+at epoch 19 for all three capacity runs; later reconstruction improvements are
+accompanied by collision worsening (Q7 final-eval `8.4746%`, Q8 `4.9780%`).
+
+Q8 is the current RQ-only minimum-collision candidate, while Q7 is the more
+conservative semantic-granularity candidate: all three Q7 layers remain fully
+utilized and its first-level prefix has 128 branches, whereas Q8 has 256 first-level
+branches and 5,535 unique two-level prefixes.  Neither candidate has yet been
+promoted to downstream SFT/GRPO or recommendation metrics in this round.
 
 ### Semantic prefix inspection
 
 Prefix examples for all candidates are stored under each analysis directory as
-`prefix_examples.json`.  Q3 and Q6 show coherent groups in sampled cases (for
-example, Q6 `<a_40>` groups caster-wheel products with centroid cosine around
-`0.905–0.918`); the examples are diagnostic evidence, not a substitute for
-HR/NDCG evaluation.
+`prefix_examples.json`.  The sampled groups remain semantically interpretable
+when capacity increases: Q6 `<a_40>` groups caster-wheel products (centroid
+cosine around `0.905–0.918`), Q7 `<a_105>` groups tabletop epoxy products
+(about `0.779–0.803`), and Q8 includes `<a_37>` 3D-printer filaments and
+`<a_100>` 3D printers (about `0.784–0.939`).  These are sampled diagnostic
+evidence, not a substitute for HR/NDCG evaluation.
 
-The formal exporter independently reproduced the same raw statistics for the two
-selected candidates: `data/sid/amazon23_1m/Industrial_and_Scientific_1m.qwen3vl_q3.index.stats.json`
-reports 5,290 unique raw SIDs / `0.294008` collision, and the corresponding
-`qwen3vl_q6.index.stats.json` reports 6,515 / `0.130522`.
+The formal exporter independently reproduced the same raw statistics for all
+selected capacity candidates.  The artifact paths are:
+
+- `...qwen3vl_q3.index.stats.json`: 5,290 unique / `0.294008` collision;
+- `...qwen3vl_q6.index.stats.json`: 6,515 unique / `0.130522` collision;
+- `...qwen3vl_q7.index.stats.json`: 7,075 unique / `0.055785` collision;
+- `...qwen3vl_q8.index.stats.json`: 7,261 unique / `0.030962` collision.
+
+The Q7/Q8 capacity runs used commit `79b9b16` as their code base, host
+`4090-1` / `CUDA_VISIBLE_DEVICES=0`, the fixed Qwen3-VL PCA-768 embedding,
+seed `2024`, 100-epoch maximum, and no z-score preprocessing.

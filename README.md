@@ -130,6 +130,14 @@ reports total items, raw unique SIDs, raw collisions and post-dedup
 collisions.  The optional `<d_n>` token disambiguates a raw collision and is
 not treated as an additional semantic RQ layer by the new reward code.
 
+For the fixed Qwen3-VL PCA-768 representation, the controlled capacity
+ablation also evaluates latent-128 `64^3`, `128^3`, and `256^3` codebooks
+(Q6/Q7/Q8) with Sinkhorn epsilon `0.003`. Their raw collision rates are
+`0.130522`, `0.055785`, and `0.030962`, respectively; codebook diagnostics
+and prefix samples are recorded in `docs/EXPERIMENT_LOG.md`. These are RQ-only
+candidate tokenizers until they are passed through the common downstream
+evaluator.
+
 ## 4. Training
 
 ### SFT

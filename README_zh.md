@@ -84,6 +84,8 @@ Item embedding → RQ-VAE / RQ-KMeans → SID index → SID CSV
 
 默认 codebook capacity 仍为 32/32/32、latent dimension 64。SID 导出会记录 total items、raw unique SID、raw collision 和 deduplicated collision。碰撞消歧用的 `<d_n>` 不是语义 RQ 层，新 reward 不会给它额外层级权重。
 
+针对固定的 Qwen3-VL PCA-768 表征，本轮还完成了 latent=128、Sinkhorn epsilon=0.003 的容量对照：`64^3`、`128^3`、`256^3`（Q6/Q7/Q8）的 raw collision rate 分别为 `0.130522`、`0.055785`、`0.030962`。逐层 codebook 统计与 prefix 样例见 `docs/EXPERIMENT_LOG.md`；这些仍是进入统一下游 evaluator 前的 RQ tokenizer 候选。
+
 ## 3. SFT 与 RL
 
 ### SFT
