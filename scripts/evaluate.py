@@ -87,20 +87,18 @@ def main(
         info_titles = [f'''### Response:\n{_}''' for _ in item_titles]
 
 
-    tokenizer = AutoTokenizer.from_pretrained(base_model)
+    tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
     print(f"[Evaluate] tokenizer loaded, candidate items={len(info_semantic)}", flush=True)
-    
-    # Create prefixID for semantic IDs (existing functionality)
-    if base_model.lower().find("llama") > -1:
-        prefixID = [tokenizer(_).input_ids[1:] for _ in info_semantic]
-        prefixTitleID = [tokenizer(_).input_ids[1:] for _ in info_titles]
-    else:
-        prefixID = [tokenizer(_).input_ids for _ in info_semantic]
-        prefixTitleID = [tokenizer(_).input_ids for _ in info_titles]
-    if base_model.lower().find("gpt2") > -1:
-        prefix_index = 4
-    else:
-        prefix_index = 3
+
+    # Build the Trie against the exact response-prefix tokenization.  The old
+    # evaluator assumed three/four prefix tokens by model family; Qwen3 can
+    # change this with tokenizer revisions, so derive it from the checkpoint.
+    response_prefix = "### Response:\n"
+    response_prefix_ids = tokenizer(response_prefix, add_special_tokens=False).input_ids
+    prefix_index = len(response_prefix_ids)
+    prefixID = [response_prefix_ids + tokenizer(value, add_special_tokens=False).input_ids for value in semantic_ids]
+    prefixTitleID = [response_prefix_ids + tokenizer(value, add_special_tokens=False).input_ids for value in item_titles]
+    print(f"[Evaluate] response_prefix_tokens={response_prefix_ids} prefix_index={prefix_index}", flush=True)
     
     # Build hash_dict for semantic IDs (existing functionality)
     hash_dict = dict()
@@ -204,7 +202,8 @@ def main(
                 prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
                 num_beams=num_beams,
                 base_model=base_model,
-                eos_token_id=model.config.eos_token_id
+                eos_token_id=model.config.eos_token_id,
+                prefix_index=prefix_index,
             )
             logits_processor = LogitsProcessorList([clp])
 

@@ -1,5 +1,7 @@
 import os
 import sys
+import re
+from collections import Counter
 from typing import List
 from pathlib import Path
 
@@ -65,6 +67,26 @@ class TokenExtender:
         self.new_tokens = sorted(list(self.new_tokens))
         
         return self.new_tokens
+
+    def get_token_stats(self):
+        """Return the exact SID vocabulary and collision-suffix statistics."""
+        tokens = self.get_new_tokens()
+        by_prefix = Counter()
+        suffix_numbers = []
+        for token in tokens:
+            match = re.fullmatch(r"<([a-z])_(\d+)>", token)
+            if match:
+                prefix, number = match.groups()
+                by_prefix[prefix] += 1
+                if prefix == "d":
+                    suffix_numbers.append(int(number))
+        return {
+            "token_count": len(tokens),
+            "tokens": tokens,
+            "tokens_by_prefix": dict(sorted(by_prefix.items())),
+            "max_collision_suffix": max(suffix_numbers, default=0),
+            "collision_suffix_count": len(suffix_numbers),
+        }
 
 
 class TrainingProgressCallback(TrainerCallback):
@@ -158,6 +180,10 @@ def train(
     train_from_scratch: bool = False,
     sid_index_path: str = "",
     item_meta_path: str = "",
+    max_steps: int = -1,
+    rec_repeat: int = 2,
+    gradient_checkpointing: bool = True,
+    save_only_model: bool = True,
 ):
     print("[SFT] initializing training function", flush=True)
     set_seed(seed)
@@ -199,6 +225,15 @@ def train(
     tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "left"
     original_vocab_size = len(tokenizer)
+    new_tokens = []
+    tokenizer_extension = {
+        "base_vocab_size": original_vocab_size,
+        "added_tokens": 0,
+        "tokens_by_prefix": {},
+        "max_collision_suffix": 0,
+        "collision_suffix_count": 0,
+        "atomic_check": "not_run",
+    }
     
     if sid_index_path and os.path.exists(sid_index_path):
         print(f"Loading index from {sid_index_path}")
@@ -206,8 +241,28 @@ def train(
         new_tokens = token_extender.get_new_tokens()
         if new_tokens:
             print(f"Adding {len(new_tokens)} new tokens to tokenizer")
-            tokenizer.add_tokens(new_tokens)
+            added_count = tokenizer.add_tokens(new_tokens)
             model.resize_token_embeddings(len(tokenizer))
+            bad_tokens = {
+                token: tokenizer.encode(token, add_special_tokens=False)
+                for token in new_tokens
+                if len(tokenizer.encode(token, add_special_tokens=False)) != 1
+            }
+            if bad_tokens:
+                examples = list(bad_tokens.items())[:5]
+                raise ValueError(
+                    "SID tokens must be atomic after tokenizer extension; "
+                    f"found {len(bad_tokens)} non-atomic tokens, examples={examples}"
+                )
+            tokenizer_extension = {
+                "base_vocab_size": original_vocab_size,
+                "final_vocab_size": len(tokenizer),
+                "added_tokens": int(added_count),
+                **token_extender.get_token_stats(),
+                "atomic_check": "passed",
+            }
+        else:
+            tokenizer_extension["atomic_check"] = "no_sid_tokens"
 
     # Freeze LLM parameters if required
     if freeze_LLM:
@@ -243,7 +298,8 @@ def train(
     print("[SFT] preparing datasets...", flush=True)
     # train_data1 = SFTData(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
     train_data1 = SidSFTDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
-    train_datasets.append(train_data1)
+    rec_repeat = max(1, int(rec_repeat))
+    train_datasets.extend([train_data1] * rec_repeat)
     train_data2 = SidItemFeatDataset(item_file=item_meta_path, index_file=sid_index_path, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
     train_datasets.append(train_data2)
     train_data3 = FusionSeqRecDataset(train_file=train_file, item_file=item_meta_path, index_file=sid_index_path, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category)
@@ -255,7 +311,16 @@ def train(
     train_data = ConcatDataset(train_datasets)
     val_data = SidSFTDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
     # val_data = SFTData(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=20000, seed=seed, category=category)
-    print("LOAD DATA FINISHED")    
+    composition = {
+        "recommendation_next_sid": len(train_data1) * rec_repeat,
+        "sid_item_feature_auxiliary": len(train_data2),
+        "fusion_title_auxiliary": len(train_data3),
+        "total": len(train_data),
+        "recommendation_fraction": (len(train_data1) * rec_repeat) / max(len(train_data), 1),
+        "rec_repeat": rec_repeat,
+    }
+    print(f"[SFT] sample composition={composition}", flush=True)
+    print("LOAD DATA FINISHED")
     
     if resume_from_checkpoint:
         checkpoint_name = os.path.join(
@@ -290,7 +355,10 @@ def train(
             warmup_steps=20,
             num_train_epochs=num_epochs,
             learning_rate=learning_rate,
+            max_steps=max_steps,
             bf16=use_cuda,
+            gradient_checkpointing=gradient_checkpointing,
+            save_only_model=save_only_model,
             logging_steps=100,
             optim="adamw_torch",
             # Epoch-level evaluation keeps smoke runs fast and avoids writing a
@@ -330,9 +398,17 @@ def train(
         "sid_index_path": sid_index_path,
         "item_meta_path": item_meta_path,
         "freeze_LLM": freeze_LLM,
+        "max_steps": max_steps,
+        "rec_repeat": rec_repeat,
+        "gradient_checkpointing": gradient_checkpointing,
+        "save_only_model": save_only_model,
+        "dataset_composition": composition,
+        "tokenizer_extension": tokenizer_extension,
     }
     with open(os.path.join(output_dir, "config.json"), "w", encoding="utf-8") as handle:
         json.dump(run_config, handle, indent=2)
+    with open(os.path.join(output_dir, "tokenizer_extension.json"), "w", encoding="utf-8") as handle:
+        json.dump(tokenizer_extension, handle, indent=2)
 
     train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     eval_metrics = trainer.evaluate()
@@ -344,6 +420,8 @@ def train(
     final_checkpoint_dir = os.path.join(output_dir, "final_checkpoint")
     trainer.model.save_pretrained(final_checkpoint_dir)
     tokenizer.save_pretrained(final_checkpoint_dir)
+    with open(os.path.join(final_checkpoint_dir, "tokenizer_extension.json"), "w", encoding="utf-8") as handle:
+        json.dump(tokenizer_extension, handle, indent=2)
 
 
 

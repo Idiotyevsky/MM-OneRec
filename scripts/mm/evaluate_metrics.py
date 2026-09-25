@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import math
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -26,21 +27,48 @@ def _buckets(train_items: list[str]) -> dict[str, str]:
     return {item: ("head" if rank < head_end else "tail" if rank >= tail_start else "mid") for rank, item in enumerate(ordered)}
 
 
-def evaluate(rows: list[dict[str, Any]], catalog: set[str], train_items: list[str], ks: tuple[int, ...] = (5, 10, 20)) -> dict[str, float | int]:
+def _raw_sid(sid: str) -> str:
+    """Drop an optional collision-disambiguation suffix from a SID string."""
+    return "".join(re.findall(r"<[abc]_\d+>", str(sid))[:3])
+
+
+def evaluate(
+    rows: list[dict[str, Any]],
+    catalog: set[str],
+    train_items: list[str],
+    ks: tuple[int, ...] = (5, 10, 20),
+    sid_index: dict[str, list[str]] | None = None,
+) -> dict[str, float | int]:
     buckets = _buckets(train_items)
+    collision_counts = Counter()
+    if sid_index:
+        collision_counts.update("".join(map(str, tokens[:3])) for tokens in sid_index.values())
     metrics: dict[str, float | int] = {"samples": len(rows)}
     recommended: set[str] = set(); invalid = total_predictions = 0
     for k in ks:
         hits = ndcgs = 0.0
         bucket_hits = Counter(); bucket_ndcgs = Counter(); bucket_totals = Counter()
+        group_hits = Counter(); group_ndcgs = Counter(); group_totals = Counter()
         for row in rows:
             target = str(row["target"]); predictions = [str(value) for value in row["predictions"]][:k]
             bucket = buckets.get(target, "tail"); bucket_totals[bucket] += 1
+            if collision_counts:
+                group = "collision" if collision_counts.get(_raw_sid(target), 1) > 1 else "non_collision"
+                group_totals[group] += 1
             if target in predictions:
-                rank = predictions.index(target) + 1; hits += 1; ndcgs += 1 / math.log2(rank + 1)
-                bucket_hits[bucket] += 1; bucket_ndcgs[bucket] += 1 / math.log2(rank + 1)
+                rank = predictions.index(target) + 1; gain = 1 / math.log2(rank + 1)
+                hits += 1; ndcgs += gain
+                bucket_hits[bucket] += 1; bucket_ndcgs[bucket] += gain
+                if collision_counts:
+                    group_hits[group] += 1; group_ndcgs[group] += gain
         metrics[f"hr@{k}"] = hits / len(rows) if rows else 0.0
         metrics[f"ndcg@{k}"] = ndcgs / len(rows) if rows else 0.0
+        if collision_counts and k == 10:
+            for group in ("collision", "non_collision"):
+                denom = group_totals[group]
+                metrics[f"hr@10_{group}"] = group_hits[group] / denom if denom else 0.0
+                metrics[f"ndcg@10_{group}"] = group_ndcgs[group] / denom if denom else 0.0
+                metrics[f"samples_{group}"] = denom
         if k == 10:
             for bucket in ("head", "mid", "tail"):
                 denom = bucket_totals[bucket]
@@ -67,8 +95,15 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--summary-csv", type=Path)
     parser.add_argument("--model-name", default="unnamed")
+    parser.add_argument("--sid-index", type=Path, help="Optional item-to-SID JSON for collision-group metrics")
     args = parser.parse_args()
-    metrics = evaluate(_load_rows(args.predictions), set(args.catalog.read_text().splitlines()), args.train_items.read_text().splitlines())
+    sid_index = json.loads(args.sid_index.read_text(encoding="utf-8")) if args.sid_index else None
+    metrics = evaluate(
+        _load_rows(args.predictions),
+        set(args.catalog.read_text().splitlines()),
+        args.train_items.read_text().splitlines(),
+        sid_index=sid_index,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True); args.output.write_text(json.dumps(metrics, indent=2) + "\n")
     if args.summary_csv:
         args.summary_csv.parent.mkdir(parents=True, exist_ok=True)

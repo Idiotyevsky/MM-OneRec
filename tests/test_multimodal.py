@@ -42,5 +42,26 @@ def test_sid_and_ranking_metrics(tmp_path: Path) -> None:
     assert metrics["invalid_sid_rate"] == 0.25
 
 
+def test_collision_group_metrics_ignore_disambiguation_suffix() -> None:
+    index = {
+        "a": ["<a_1>", "<b_1>", "<c_1>", "<d_1>"],
+        "b": ["<a_1>", "<b_1>", "<c_1>", "<d_2>"],
+        "c": ["<a_2>", "<b_2>", "<c_2>"],
+    }
+    a = "<a_1><b_1><c_1><d_1>"
+    b = "<a_1><b_1><c_1><d_2>"
+    c = "<a_2><b_2><c_2>"
+    rows = [
+        {"target": a, "predictions": [a]},
+        {"target": b, "predictions": ["invalid"]},
+        {"target": c, "predictions": [c]},
+    ]
+    metrics = evaluate(rows, {a, b, c}, [a, b, c], (10,), sid_index=index)
+    assert metrics["samples_collision"] == 2
+    assert metrics["samples_non_collision"] == 1
+    assert metrics["hr@10_collision"] == 0.5
+    assert metrics["hr@10_non_collision"] == 1.0
+
+
 def test_item_text_handles_list_description() -> None:
     assert item_text({"title": "Widget", "description": ["red", "small"]}) == "Title: Widget. Description: red small"

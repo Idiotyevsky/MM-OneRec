@@ -28,7 +28,8 @@ class ConstrainedLogitsProcessor(LogitsProcessor):
         prefix_allowed_tokens_fn: Callable[[int, torch.Tensor], List[int]],
         num_beams: int,
         base_model: str = None,
-        eos_token_id: int = None
+        eos_token_id: int = None,
+        prefix_index: int = None,
     ):
         self._prefix_allowed_tokens_fn = prefix_allowed_tokens_fn
         self._num_beams = num_beams
@@ -41,7 +42,9 @@ class ConstrainedLogitsProcessor(LogitsProcessor):
         self.backoff_hit_total = 0
         self._step_warning_count = {}
         self._total_warning_count = 0
-        if self.base_model.lower().find("gpt2") > -1:
+        if prefix_index is not None:
+            self.prefix_index = int(prefix_index)
+        elif self.base_model.lower().find("gpt2") > -1:
             self.prefix_index = 4
         else:
             self.prefix_index = 3
