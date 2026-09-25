@@ -235,7 +235,9 @@ class FrequencyAwareTrainer(transformers.Trainer):
         if labels is None:
             loss = outputs.loss
         else:
-            logits = outputs.logits
+            # Match Transformers causal-LM loss: compute CE in FP32 even when the model forward runs in BF16.
+            # Keeping logits in BF16 here can materially distort the weighted loss.
+            logits = outputs.logits.float()
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             token_loss = F.cross_entropy(
