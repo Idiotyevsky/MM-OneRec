@@ -13,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
 import numpy as np 
 import fire
 import torch
+import torch.nn.functional as F
 import transformers
 from datasets import load_dataset, concatenate_datasets
 from transformers import EarlyStoppingCallback, AutoConfig, TrainerCallback
@@ -122,6 +123,136 @@ class TrainingProgressCallback(TrainerCallback):
                 print(f"[SFT Progress] step {step}")
 
 
+
+_FIRST_PREFIX_RE = re.compile(r"<a_\d+>")
+
+
+def _first_sid_prefix_from_labels(label_ids, tokenizer):
+    """Decode the supervised target and return its first-level SID token."""
+    target_ids = [int(token_id) for token_id in label_ids if int(token_id) != -100]
+    if not target_ids:
+        return None
+    target_text = tokenizer.decode(target_ids, skip_special_tokens=False)
+    match = _FIRST_PREFIX_RE.search(target_text)
+    return match.group(0) if match else None
+
+
+def _build_frequency_weights(rec_dataset, tokenizer):
+    """Build first-level popularity weights from recommendation targets only."""
+    counts = Counter()
+    missing = 0
+    for idx in range(len(rec_dataset)):
+        prefix = _first_sid_prefix_from_labels(rec_dataset[idx]["labels"], tokenizer)
+        if prefix is None:
+            missing += 1
+            continue
+        counts[prefix] += 1
+    if missing:
+        raise ValueError(
+            f"Could not extract first-level SID prefix from {missing}/{len(rec_dataset)} "
+            "recommendation targets; refusing to train with incomplete frequency weights."
+        )
+    if not counts:
+        raise ValueError("No recommendation targets were available for frequency weighting.")
+
+    epsilon = 1e-8
+    clip_min, clip_max = 0.5, 2.0
+    raw = {prefix: 1.0 / math.sqrt(float(freq) + epsilon) for prefix, freq in counts.items()}
+    raw_mean = float(np.mean(list(raw.values())))
+    normalized = {prefix: value / raw_mean for prefix, value in raw.items()}
+    weights = {
+        prefix: float(np.clip(value, clip_min, clip_max))
+        for prefix, value in normalized.items()
+    }
+    sorted_by_freq = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    sorted_by_rare = sorted(counts.items(), key=lambda pair: (pair[1], pair[0]))
+    final_values = list(weights.values())
+    stats = {
+        "min": float(min(final_values)),
+        "max": float(max(final_values)),
+        "mean": float(np.mean(final_values)),
+        "median": float(np.median(final_values)),
+        "num_prefixes": len(counts),
+        "num_recommendation_samples": int(len(rec_dataset)),
+        "missing_prefix_samples": int(missing),
+        "epsilon": epsilon,
+        "clip": [clip_min, clip_max],
+    }
+    payload = {
+        "formula": "clip((1/sqrt(freq+1e-8))/mean(raw), 0.5, 2.0)",
+        "stats": stats,
+        "prefix_counts": {prefix: int(counts[prefix]) for prefix in sorted(counts)},
+        "raw_weights": {prefix: float(raw[prefix]) for prefix in sorted(raw)},
+        "weights": {prefix: float(weights[prefix]) for prefix in sorted(weights)},
+        "top_frequency_prefixes": [
+            {"prefix": prefix, "frequency": int(freq), "weight": weights[prefix]}
+            for prefix, freq in sorted_by_freq[:10]
+        ],
+        "lowest_frequency_prefixes": [
+            {"prefix": prefix, "frequency": int(freq), "weight": weights[prefix]}
+            for prefix, freq in sorted_by_rare[:10]
+        ],
+    }
+    return weights, payload
+
+
+def _python_value(value):
+    """Convert tensor/NumPy values into values accepted by datasets.Dataset."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return value
+
+
+class FrequencyAwareDataCollator:
+    """Keep per-sample metadata while delegating padding to the HF collator."""
+
+    def __init__(self, base_collator):
+        self.base_collator = base_collator
+
+    def __call__(self, features):
+        weights = [float(feature.get("sample_weight", 1.0)) for feature in features]
+        task_types = [feature.get("task_type", "auxiliary") for feature in features]
+        stripped = [
+            {key: value for key, value in feature.items() if key not in {"sample_weight", "task_type"}}
+            for feature in features
+        ]
+        batch = self.base_collator(stripped)
+        batch["sample_weight"] = torch.tensor(weights, dtype=torch.float32)
+        batch["task_type"] = task_types
+        return batch
+
+
+class FrequencyAwareTrainer(transformers.Trainer):
+    """Trainer with first-level popularity weighting for recommendation rows."""
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        sample_weight = inputs.pop("sample_weight", None)
+        inputs.pop("task_type", None)
+        labels = inputs.get("labels")
+        outputs = model(**inputs)
+        if labels is None:
+            loss = outputs.loss
+        else:
+            logits = outputs.logits
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            token_loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                reduction="none",
+                ignore_index=-100,
+            ).view(shift_labels.size(0), -1)
+            valid_tokens = shift_labels.ne(-100)
+            per_sample_loss = token_loss.sum(dim=1) / valid_tokens.sum(dim=1).clamp_min(1)
+            if sample_weight is None:
+                sample_weight = torch.ones_like(per_sample_loss)
+            else:
+                sample_weight = sample_weight.to(per_sample_loss.device, dtype=per_sample_loss.dtype)
+            loss = (per_sample_loss * sample_weight).mean()
+        return (loss, outputs) if return_outputs else loss
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -182,6 +313,8 @@ def train(
     item_meta_path: str = "",
     max_steps: int = -1,
     rec_repeat: int = 2,
+    frequency_aware: bool = False,
+    prefix_weights_path: str = "",
     gradient_checkpointing: bool = True,
     save_only_model: bool = True,
 ):
@@ -294,45 +427,82 @@ def train(
         print(f"Trainable parameters (with grad-mask): {trainable_params:,} / "
             f"{total_params:,} ({100*trainable_params/total_params:.2f}%)")
         
-    train_datasets = []
     print("[SFT] preparing datasets...", flush=True)
-    # train_data1 = SFTData(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
-    train_data1 = SidSFTDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
+    train_data1 = SidSFTDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,
+                                 sample=sample, seed=seed, category=category)
     rec_repeat = max(1, int(rec_repeat))
-    train_datasets.extend([train_data1] * rec_repeat)
-    train_data2 = SidItemFeatDataset(item_file=item_meta_path, index_file=sid_index_path, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
-    train_datasets.append(train_data2)
-    train_data3 = FusionSeqRecDataset(train_file=train_file, item_file=item_meta_path, index_file=sid_index_path, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category)
-    train_datasets.append(train_data3)
-    # train_data4 = SFTData(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
-    # train_datasets.append(train_data4)
-    # train_data5 = TitleHistory2SidSFTDataset(train_file=train_file, item_file=item_meta_path, index_file=sid_index_path, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category)
-    # train_datasets.append(train_data5)
-    train_data = ConcatDataset(train_datasets)
-    val_data = SidSFTDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
-    # val_data = SFTData(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=20000, seed=seed, category=category)
+    train_data2 = SidItemFeatDataset(item_file=item_meta_path, index_file=sid_index_path,
+                                      tokenizer=tokenizer, max_len=cutoff_len, sample=sample,
+                                      seed=seed, category=category)
+    train_data3 = FusionSeqRecDataset(train_file=train_file, item_file=item_meta_path,
+                                       index_file=sid_index_path, tokenizer=tokenizer,
+                                       max_len=cutoff_len, sample=sample, seed=seed,
+                                       category=category)
+    val_data = SidSFTDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
+                             sample=sample, seed=seed, category=category)
     composition = {
         "recommendation_next_sid": len(train_data1) * rec_repeat,
         "sid_item_feature_auxiliary": len(train_data2),
         "fusion_title_auxiliary": len(train_data3),
-        "total": len(train_data),
-        "recommendation_fraction": (len(train_data1) * rec_repeat) / max(len(train_data), 1),
+        "total": len(train_data1) * rec_repeat + len(train_data2) + len(train_data3),
+        "recommendation_fraction": (len(train_data1) * rec_repeat) / max(
+            len(train_data1) * rec_repeat + len(train_data2) + len(train_data3), 1
+        ),
         "rec_repeat": rec_repeat,
     }
     print(f"[SFT] sample composition={composition}", flush=True)
     print("LOAD DATA FINISHED")
-    
+
     if resume_from_checkpoint:
-        checkpoint_name = os.path.join(
-            resume_from_checkpoint, "pytorch_model.bin"
-        )  # Full checkpoint
+        checkpoint_name = os.path.join(resume_from_checkpoint, "pytorch_model.bin")
 
     if not ddp and torch.cuda.device_count() > 1:
         model.is_parallelizable = True
         model.model_parallel = True
-    
+
     sample_frac = 1
-    hf_train_dataset = HFDataset.from_dict({k: [v[k] for v in train_data] for k in train_data[0].keys()})
+    frequency_payload = None
+    if frequency_aware:
+        prefix_weights, frequency_payload = _build_frequency_weights(train_data1, tokenizer)
+        os.makedirs(output_dir, exist_ok=True)
+        weights_file = prefix_weights_path or os.path.join(output_dir, "prefix_weights.json")
+        with open(weights_file, "w", encoding="utf-8") as handle:
+            json.dump(frequency_payload, handle, indent=2)
+        print(f"[SFT] frequency weights saved to {weights_file}", flush=True)
+        print(f"[SFT] frequency weight stats={frequency_payload['stats']}", flush=True)
+        for row in frequency_payload["top_frequency_prefixes"][:5]:
+            print(f"[SFT] popular prefix={row['prefix']} freq={row['frequency']} weight={row['weight']:.6f}", flush=True)
+        for row in frequency_payload["lowest_frequency_prefixes"][:5]:
+            print(f"[SFT] rare prefix={row['prefix']} freq={row['frequency']} weight={row['weight']:.6f}", flush=True)
+
+        rec_rows = []
+        for idx in range(len(train_data1)):
+            item = train_data1[idx]
+            prefix = _first_sid_prefix_from_labels(item["labels"], tokenizer)
+            if prefix not in prefix_weights:
+                raise ValueError(f"Missing frequency weight for target prefix {prefix!r}")
+            row = {key: _python_value(value) for key, value in item.items()}
+            row["task_type"] = "recommendation"
+            row["sample_weight"] = float(prefix_weights[prefix])
+            rec_rows.append(row)
+        aux_rows = []
+        for dataset in (train_data2, train_data3):
+            for idx in range(len(dataset)):
+                item = dataset[idx]
+                row = {key: _python_value(value) for key, value in item.items()}
+                row["task_type"] = "auxiliary"
+                row["sample_weight"] = 1.0
+                aux_rows.append(row)
+        rows = []
+        for _ in range(rec_repeat):
+            rows.extend(dict(row) for row in rec_rows)
+        rows.extend(aux_rows)
+        hf_train_dataset = HFDataset.from_list(rows)
+    else:
+        train_datasets = [train_data1] * rec_repeat + [train_data2, train_data3]
+        train_data = ConcatDataset(train_datasets)
+        hf_train_dataset = HFDataset.from_dict({k: [v[k] for v in train_data] for k in train_data[0].keys()})
+
     hf_train_dataset = hf_train_dataset.shuffle(seed=42).select(range(int(sample_frac * len(hf_train_dataset))))
     hf_val_dataset = HFDataset.from_dict({k: [v[k] for v in val_data] for k in val_data[0].keys()}).shuffle(seed=seed)
     hf_val_dataset = hf_val_dataset.shuffle(seed=42)
@@ -341,7 +511,12 @@ def train(
     print(hf_val_dataset)
     print("[SFT] building Trainer...", flush=True)
     use_cuda = torch.cuda.is_available()
-    trainer = transformers.Trainer(
+    base_collator = transformers.DataCollatorForSeq2Seq(
+        tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
+    )
+    trainer_cls = FrequencyAwareTrainer if frequency_aware else transformers.Trainer
+    data_collator = FrequencyAwareDataCollator(base_collator) if frequency_aware else base_collator
+    trainer = trainer_cls(
         # deepspeed=deepspeed,
         model=model,
         train_dataset=hf_train_dataset,
@@ -369,13 +544,12 @@ def train(
             save_total_limit=1,
             load_best_model_at_end=True,
             ddp_find_unused_parameters=False if ddp else None,
+            remove_unused_columns=False if frequency_aware else True,
             group_by_length=group_by_length,
             report_to="wandb",
             disable_tqdm=False,
         ),
-        data_collator=transformers.DataCollatorForSeq2Seq(
-            tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
-        ),
+        data_collator=data_collator,
         callbacks = [EarlyStoppingCallback(early_stopping_patience=3), TrainingProgressCallback()],
         # optimizers=(optimizer, lr_scheduler) 
     )
@@ -400,6 +574,9 @@ def train(
         "freeze_LLM": freeze_LLM,
         "max_steps": max_steps,
         "rec_repeat": rec_repeat,
+        "frequency_aware": frequency_aware,
+        "prefix_weights_path": prefix_weights_path,
+        "frequency_weighting": frequency_payload,
         "gradient_checkpointing": gradient_checkpointing,
         "save_only_model": save_only_model,
         "dataset_composition": composition,

@@ -99,15 +99,31 @@ def evaluate(
     # Trie-constrained evaluation), not over unique users.  This makes the
     # denominator explicit and comparable across runs with different validity.
     valid_slots = sum(valid_item_counts.values())
+    top10_items = sum(count for _, count in valid_item_counts.most_common(10))
     top20_items = sum(count for _, count in valid_item_counts.most_common(20))
+    top10_prefixes = sum(count for _, count in valid_prefix_counts.most_common(10))
     top20_prefixes = sum(count for _, count in valid_prefix_counts.most_common(20))
     metrics["unique_recommended_items"] = len(recommended)
     metrics["valid_recommendation_slots"] = valid_slots
+    metrics["top10_item_count"] = min(10, len(valid_item_counts))
+    metrics["top10_item_share"] = top10_items / valid_slots if valid_slots else 0.0
     metrics["top20_item_count"] = min(20, len(valid_item_counts))
     metrics["top20_item_share"] = top20_items / valid_slots if valid_slots else 0.0
     metrics["unique_a_prefixes"] = len(valid_prefix_counts)
+    metrics["top10_a_prefix_count"] = min(10, len(valid_prefix_counts))
+    metrics["top10_a_prefix_share"] = top10_prefixes / valid_slots if valid_slots else 0.0
     metrics["top20_a_prefix_count"] = min(20, len(valid_prefix_counts))
     metrics["top20_a_prefix_share"] = top20_prefixes / valid_slots if valid_slots else 0.0
+    if len(valid_prefix_counts) > 1 and valid_slots:
+        prefix_probabilities = [count / valid_slots for count in valid_prefix_counts.values()]
+        prefix_entropy = -sum(prob * math.log(prob) for prob in prefix_probabilities if prob > 0)
+        metrics["first_prefix_entropy"] = prefix_entropy
+        metrics["first_prefix_normalized_entropy"] = prefix_entropy / math.log(len(valid_prefix_counts))
+        metrics["first_prefix_perplexity"] = math.exp(prefix_entropy)
+    else:
+        metrics["first_prefix_entropy"] = 0.0
+        metrics["first_prefix_normalized_entropy"] = 0.0
+        metrics["first_prefix_perplexity"] = float(len(valid_prefix_counts)) if valid_prefix_counts else 0.0
     return metrics
 
 

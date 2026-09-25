@@ -71,10 +71,15 @@ def test_recommendation_concentration_metrics_use_valid_beam_slots() -> None:
     metrics = evaluate(rows, {"<a_0>", "<a_1>", "<a_2>"}, ["<a_0>", "<a_1>", "<a_2>"])
     assert metrics["unique_recommended_items"] == 3
     assert metrics["valid_recommendation_slots"] == 6
+    assert metrics["top10_item_count"] == 3
+    assert metrics["top10_item_share"] == 1.0
     assert metrics["top20_item_count"] == 3
     assert metrics["top20_item_share"] == 1.0
     assert metrics["unique_a_prefixes"] == 3
+    assert metrics["top10_a_prefix_share"] == 1.0
     assert metrics["top20_a_prefix_share"] == 1.0
+    assert metrics["first_prefix_entropy"] > 0.0
+    assert 0.0 < metrics["first_prefix_normalized_entropy"] <= 1.0
 
 
 def test_item_text_handles_list_description() -> None:
