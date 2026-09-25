@@ -25,7 +25,7 @@ tensor_model_parallel_size: 1
 use_torch_compile: false
 gpus_per_node: 1
 nodes: 1
-training_rollout_constraint: unconstrained_invalid_zero
+training_rollout_constraint: trie
 save_freq: 4
 rollout_data_dir: outputs/verl_grpo/smoke_messages/rollouts
 chat_template: "{% for message in messages %}{{ message['content'] }}{% endfor %}"

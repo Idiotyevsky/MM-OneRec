@@ -148,12 +148,15 @@ Actor-side reference KL keeps the policy near the SFT/reference distribution
 and reduces reward hacking.  It is configured with `kl_loss_coef`, default
 `1e-3`, and is logged by native verl.
 
-## 25. Why is training rollout unconstrained?
+## 25. How is training-time rollout constrained?
 
-The current verl/vLLM integration in this checkout does not expose a stable
-batch Trie logits processor.  The launcher therefore keeps rollout native and
-assigns zero reward to invalid SIDs.  Evaluation still uses the existing Trie;
-there is no vLLM monkey patch.
+The native constrained mode registers an MM-OneRec rollout subclass at runtime
+and attaches a catalog Trie through vLLM V0's public
+SamplingParams.logits_processors hook. The launcher sets VLLM_USE_V1=0
+because the installed vLLM V1 path rejects per-request user processors. Each
+rollout is therefore restricted to a catalog-valid SID path, followed by the
+response newline and EOS. The previous unconstrained mode remains available
+for ablation; there an invalid SID receives zero reward.
 
 ## 26. How does Trie decoding work?
 

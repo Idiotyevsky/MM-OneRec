@@ -125,11 +125,22 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--reward-config", type=Path, help="JSON RewardConfig with index/embedding paths")
     parser.add_argument("--dry-run", action="store_true", help="Print the native verl command without starting training")
-    parser.add_argument("--constrained-rollout", action="store_true", help="Fail explicitly: training-time Trie guidance is not enabled in this version")
+    parser.add_argument(
+        "--constrained-rollout",
+        action="store_true",
+        help="Enable catalog-valid vLLM V0 Trie guidance during training rollout",
+    )
     args = parser.parse_args()
     config = _load_yaml(args.config)
-    if args.constrained_rollout or config.get("training_rollout_constraint") not in {None, "unconstrained_invalid_zero"}:
-        raise SystemExit("Training rollout Trie guidance is not implemented for this verl version; use unconstrained rollouts and invalid-SID reward=0. Evaluation remains Trie-constrained.")
+    constraint_mode = (
+        "trie"
+        if args.constrained_rollout
+        else str(config.get("training_rollout_constraint", "unconstrained_invalid_zero"))
+    )
+    if constraint_mode not in {"unconstrained_invalid_zero", "trie"}:
+        raise SystemExit(
+            "training_rollout_constraint must be 'unconstrained_invalid_zero' or 'trie'"
+        )
     reward_path = ROOT / "rl" / "verl" / "reward.py"
     output_dir = Path(str(config.get("output_dir", "outputs/verl_grpo"))).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -151,8 +162,42 @@ def main() -> None:
         }
         effective_reward_config.write_text(json.dumps(reward_payload, indent=2) + "\n", encoding="utf-8")
     overrides = build_overrides(config, reward_path, effective_reward_config)
-    command = [sys.executable, "-m", "verl.trainer.main_ppo", *overrides]
-    run_config = {**config, "launcher": "verl.trainer.main_ppo", "algorithm": "grpo", "reward_path": str(reward_path), "reward_config": str(effective_reward_config), "training_rollout_constraint": "unconstrained_invalid_zero", "overrides": overrides}
+    if constraint_mode == "trie":
+        index_path = config.get("index_path")
+        if not index_path and effective_reward_config.exists():
+            reward_payload = json.loads(effective_reward_config.read_text(encoding="utf-8"))
+            index_path = reward_payload.get("index_path")
+        if not index_path:
+            raise SystemExit(
+                "Trie rollout requires index_path in the GRPO config or reward config"
+            )
+        resolved_index = Path(str(index_path)).expanduser()
+        if not resolved_index.is_absolute():
+            resolved_index = (ROOT / resolved_index).resolve()
+        if not resolved_index.exists():
+            raise SystemExit(f"Trie rollout SID index does not exist: {resolved_index}")
+        overrides.append(
+            _override(
+                "actor_rollout_ref.model.external_lib",
+                "rl.verl.register_trie_rollout",
+            )
+        )
+        launcher_module = "rl.verl.launch_ppo"
+    else:
+        launcher_module = "verl.trainer.main_ppo"
+    command = [sys.executable, "-m", launcher_module, *overrides]
+    run_config = {
+        **config,
+        "launcher": launcher_module,
+        "algorithm": "grpo",
+        "reward_path": str(reward_path),
+        "reward_config": str(effective_reward_config),
+        "training_rollout_constraint": constraint_mode,
+        "overrides": overrides,
+    }
+    if constraint_mode == "trie":
+        run_config["rollout_backend"] = "vllm_v0_sampling_params_logits_processors"
+        run_config["trie_index_path"] = str(resolved_index)
     (output_dir / "config.json").write_text(json.dumps(run_config, indent=2) + "\n", encoding="utf-8")
     print("Native verl command:")
     print(" ".join(shlex.quote(part) for part in command))
@@ -162,6 +207,11 @@ def main() -> None:
         raise SystemExit("verl is not installed in this environment. Install a compatible verl release, then rerun this command; no legacy trainer fallback is performed.")
     env = os.environ.copy()
     env["MM_ONEREC_REWARD_CONFIG"] = str(effective_reward_config)
+    if constraint_mode == "trie":
+        # vLLM V1 rejects per-request user logits processors. V0 supports the
+        # public API used by TrieVLLMRollout; this is set before any vLLM import.
+        env["VLLM_USE_V1"] = "0"
+        env["MM_ONEREC_TRIE_INDEX_PATH"] = str(resolved_index)
     subprocess.run(command, cwd=ROOT, env=env, check=True)
 
 
