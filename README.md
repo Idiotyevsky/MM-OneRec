@@ -1,308 +1,290 @@
 # MM-OneRec
 
-MM-OneRec is a semantic-ID generative recommendation system.  It keeps the
-MiniOneRec downstream task fixed—user history semantic IDs are mapped to the
-next-item semantic ID—and makes the item representation and policy-training
-choices explicit:
+MM-OneRec is a multimodal generative recommender built around Semantic IDs,
+Qwen3-VL item representations, Qwen3-4B post-training, and constrained
+decoding. It formulates sequential next-item recommendation as autoregressive
+generation of a catalog item code.
 
-```text
-Amazon item (title, description, image)
-        |
-        +-- Text-only representation
-        +-- SigLIP text/image baseline
-        +-- Frozen Qwen3-VL joint representation
-        +-- Qwen3-VL + train-only recommendation alignment
-        |
-        v
-RQ-VAE residual quantization -> hierarchical Semantic ID
-        |
-        v
-Qwen SFT -> native verl GRPO -> Trie-constrained Top-K evaluation
-```
+~~~text
+Title + Description + Image
+            │
+            ▼
+      Frozen Qwen3-VL
+            │
+            ▼
+        PCA / L2 norm
+            │
+            ▼
+          RQ-VAE
+            │
+  <a_i><b_j><c_k>[<d_n>]
+            │
+            ▼
+        Qwen3-4B
+        SFT → GRPO
+            │
+            ▼
+ Trie-constrained beam search
+            │
+            ▼
+      Top-K recommendation
+~~~
 
-The repository preserves the original SigLIP-MM, Text-SID, SFT, legacy RL,
-Trie decoding and Amazon23 artifacts.  New representation tracks use the same
-RQ/SID, generator, split and evaluator so their effects can be separated.
+## Highlights
 
-## 1. Tracks and implementation status
+- **Multimodal item representation**: title, description, and product image
+  are encoded jointly by a frozen Qwen3-VL model.
+- **Hierarchical Semantic IDs**: RQ-VAE converts continuous item vectors into
+  multi-level discrete codes that can be generated token by token.
+- **LLM-based recommendation**: Qwen3-4B predicts the next item SID from a
+  user's chronological SID history.
+- **Recommendation post-training**: supervised fine-tuning and native verl
+  GRPO with group-relative rewards, clipping, and reference KL.
+- **Valid generative retrieval**: a prefix Trie masks invalid SID continuations
+  during evaluation, so decoded paths map back to catalog items.
+- **Full-catalog protocol**: deterministic beam search, ranking metrics,
+  coverage, validity, and long-tail analysis are supported.
 
-| Track | Representation | SID | SFT | RL | Evaluation |
-|---|---|:---:|:---:|---|:---:|
-| Text baseline | existing text embedding | yes | yes | legacy RL artifact | formal artifact |
-| SigLIP-MM baseline | normalized `0.7 * text + 0.3 * image` | yes | yes | legacy RL artifact | formal artifact |
-| Text/SigLIP + native verl GRPO | same baseline representations | launcher ready | data conversion ready | requires verl run | not run in this checkout |
-| Qwen3VL-MM | frozen joint VLM representation | Q6/Q7/Q8 exported | Qwen3-4B Q6/Q7/Q8 complete | not run | Q6/Q7/Q8 complete |
-| Qwen3VL-RecAlign | frozen VLM + train-only projector | alignment code ready | not run | not run | not run |
+## Multimodal Item Representation
 
-“Formal artifact” refers only to the recorded files under
-`outputs/formal_amazon23_1m/` and `outputs/qwen3_4b/`; native-verl metrics are
-still separate and have not been mixed into the SFT comparison. Qwen3-VL RQ
-diagnostics and ablations are recorded in `docs/EXPERIMENT_LOG.md` and
-`results/rq_ablation_qwen3vl.csv`.
+### Qwen3-VL
 
-## 2. Representation layer
+multimodal/qwen3_vl_encoder.py uses Qwen/Qwen3-VL-4B-Instruct as a frozen
+item encoder. Each item is represented with an image when available and with
+title plus description. The default last_token pooling reads the last valid
+text position after the joint image-text context; text_mean is available for
+controlled comparisons.
 
-### Existing SigLIP baseline
+Missing images use the same Qwen3-VL model with a text-only message. They do
+not switch to a different embedding space. Encodings are saved together with
+item IDs, image-presence masks, model metadata, and optional PCA statistics.
+PCA can project the native hidden size to 768 dimensions before RQ-VAE.
 
-`multimodal/text_encoder.py`, `multimodal/image_encoder.py` and
-`multimodal/multimodal_encoder.py` implement the original reproducible track:
-
-```text
-title + description -> frozen SigLIP text tower
-image               -> frozen SigLIP vision tower
-e_mm = normalize(0.7 * normalize(e_text) + 0.3 * normalize(e_image))
-```
-
-Image URLs are downloaded once by `multimodal/image_downloader.py`.  A missing
-or broken image is represented by a false mask and weighted fusion falls back
-to the text vector.  This behavior is retained for the baseline.
-
-### Frozen Qwen3-VL item representation
-
-`multimodal/qwen3_vl_encoder.py` adds the joint track.  The default model is
-`Qwen/Qwen3-VL-4B-Instruct`; development runs can select a smaller compatible
-Qwen3-VL checkpoint.  The model is frozen and receives one item at a time in
-the following deterministic form:
-
-```text
-Represent this product for recommendation.
-Focus on category, function, appearance, material, style and product attributes.
-Title: ...
-Description: ...
-Product representation:
-```
-
-The default `last_token` pooling takes the last valid text position using the
-attention mask.  `text_mean` is also available and excludes known image-token
-IDs when the processor exposes them.  A missing image uses the same Qwen3-VL
-model with title and description only; it never falls back to the SigLIP
-space.  The output records `has_image`, `raw_dim`, pooling, model name and
-projection metadata.  Optional PCA projection is fitted only on item content
-vectors, for example from the native hidden size to 768 dimensions:
-
-```bash
-python -m multimodal.qwen3_vl_encoder \
-  --items data/Amazon/index/Industrial_and_Scientific.item.json \
-  --manifest data/cache/amazon23_1k/images.jsonl \
-  --output data/embeddings/industrial.qwen3vl.npy \
+~~~bash
+bash scripts/mm/encode_qwen3vl.sh \
+  --items <item-metadata.json> \
+  --manifest <cached-image-manifest.jsonl> \
+  --output data/embeddings/items.qwen3vl.npy \
   --model Qwen/Qwen3-VL-4B-Instruct \
-  --pooling last_token --projection pca --target-dim 768 \
-  --batch-size 1 --device cuda:0
-```
+  --pooling last_token \
+  --projection pca --target-dim 768 \
+  --batch-size 4 --device cuda:0
+~~~
 
-The command writes the matrix, a `.json` metadata sidecar, aligned
-`.item_ids.json`, and `.has_image.npy`.
+The repository also keeps a frozen SigLIP baseline. Its fusion is:
 
-### Recommendation-aware alignment
+~~~text
+e_mm = normalize(0.7 * normalize(e_text) + 0.3 * normalize(e_image))
+~~~
 
-`multimodal/rec_alignment.py` keeps the VLM frozen and trains only:
+### Recommendation-aware Alignment
 
-```text
-Linear -> GELU -> Linear -> L2 normalization
-```
+multimodal/rec_alignment.py optionally trains a small projector while the
+Qwen3-VL encoder stays frozen:
 
-The user vector is a recency-weighted mean of history item vectors.  The
-projector is optimized with sampled-negative InfoNCE using only the specified
-training CSV.  Validation and test files are never opened by this module.
-The resulting 128D/256D matrix can be sent through the same RQ-VAE code path:
+~~~text
+Linear → GELU → Linear → L2 normalization
+~~~
 
-```bash
-python -m multimodal.rec_alignment \
-  --embeddings data/embeddings/industrial.qwen3vl.npy \
-  --items data/Amazon/index/Industrial_and_Scientific.item.json \
-  --train-csv data/Amazon/train/Industrial_and_Scientific_5_2016-10-2018-11.csv \
-  --output data/embeddings/industrial.qwen3vl-recalign.npy \
-  --output-dim 256 --epochs 3 --negatives 32 --device cuda:0
-```
+A recency-pooled history vector is matched to the next training item with
+sampled-negative InfoNCE. Only training interactions are used. The resulting
+item vectors follow the same RQ-VAE and recommendation pipeline.
 
-## 3. Semantic IDs and common downstream path
+## Semantic ID Tokenization
 
-Every representation track follows the same path:
+All representation tracks use the same downstream interface:
 
-```text
-item embedding -> RQ-VAE/RQ-KMeans -> SID index -> SID CSV
-             -> Qwen SFT -> RL -> Trie evaluator
-```
+~~~text
+item embedding
+    ↓
+RQ-VAE / RQ-KMeans
+    ↓
+SID index and interaction CSV
+    ↓
+Qwen SFT → RL post-training → Trie evaluation
+~~~
 
-The default RQ capacity remains 32/32/32 codebooks and latent dimension 64;
-track-specific capacity changes are not silently introduced.  SID export
-reports total items, raw unique SIDs, raw collisions and post-dedup
-collisions.  The optional `<d_n>` token disambiguates a raw collision and is
-not treated as an additional semantic RQ layer by the new reward code.
+RQ-VAE residual quantization produces a hierarchy such as:
 
-For the fixed Qwen3-VL PCA-768 representation, the controlled capacity
-ablation also evaluates latent-128 `64^3`, `128^3`, and `256^3` codebooks
-(Q6/Q7/Q8) with Sinkhorn epsilon `0.003`. Their raw collision rates are
-`0.130522`, `0.055785`, and `0.030962`, respectively; codebook diagnostics
-and prefix samples are recorded in `docs/EXPERIMENT_LOG.md`. They are evaluated
-downstream below with one fixed Qwen3-4B generator and one fixed protocol.
+~~~text
+<a_i><b_j><c_k>
+~~~
 
-## 4. Training
+The implementation supports controlled codebook-capacity studies including
+64^3, 128^3, and 256^3 configurations. Codebook utilization, entropy,
+perplexity, prefix diversity, reconstruction quality, and raw SID collisions
+can be inspected with scripts/mm/analyze_codebook.py.
 
-### SFT
+If multiple items share the same raw RQ path, export adds a deterministic
+collision-disambiguation suffix:
 
-The existing `scripts/sft.py` remains the generator SFT entry point.  Its
-causal objective is:
+~~~text
+<a_i><b_j><c_k><d_n>
+~~~
 
-```text
-P(next SID | history SID)
-```
+<d_n> is an addressing suffix, not a fourth semantic RQ layer. Items with
+unique raw SIDs terminate after the three semantic tokens, while collision
+groups use only as many suffix values as required. The suffix is handled by
+the tokenizer and Trie but is excluded from hierarchical semantic rewards.
 
-Item representation affects the SFT task only through the exported SID index;
-the VLM is not inserted into the Qwen generator prompt.
+## Generative Recommendation
 
-### Legacy RL baseline
+### Qwen3-4B SFT
 
-`scripts/rl.py` and `minionerec/trainer.py` are retained as
-`legacy_group_relative_rl`.  They reproduce the old artifacts, but their
-detached self-ratio policy term is not a standard old-policy clipped
-surrogate.  They are no longer the recommended RL entry point.
+The core task is:
+
+~~~text
+user history SID sequence → next-item SID
+~~~
+
+The representation model is used before training to construct the catalog SID.
+Images and VLM hidden states are not inserted into the Qwen prompt. SID tokens
+are added as atomic tokenizer entries and the model vocabulary is resized
+accordingly. The causal objective is applied only to target tokens.
+
+The SFT entry point is scripts/sft.py; the shell wrapper is
+scripts/mm/train_sft.sh.
+
+### Trie-constrained Decoding
+
+minionerec/logit_processor.py builds a prefix map from the catalog SID index.
+At each decoding step it permits only valid child tokens. Beam search can
+therefore return several catalog-mappable item candidates while preventing
+invalid SID paths.
+
+## Recommendation Post-training
 
 ### Native verl GRPO
 
-The new entry point is `rl/verl/run_grpo.sh`.  It delegates rollout, old
-policy log-probabilities, PPO clipping, reference-model KL and optimizer
-updates to `verl.trainer.main_ppo`:
+The recommended RL entry point is rl/verl/run_grpo.py or its shell wrapper
+rl/verl/run_grpo.sh. Native verl provides rollout, old-policy log
+probabilities, clipped policy updates, and optimizer state management. The
+configuration separates:
 
-```bash
-python -m rl.verl.prepare_data \
-  --interactions data/Amazon/train/Industrial_and_Scientific_5_2016-10-2018-11.csv \
-  --output data/verl/industrial/train.parquet \
-  --dataset Amazon23 --category Industrial_and_Scientific
+~~~text
+pi_old  = policy that generated the rollout
+pi_ref  = reference model used for KL regularization
+~~~
 
-python -m rl.verl.run_grpo \
-  --config rl/verl/configs/grpo_small.yaml --dry-run
+The group-relative advantage is computed from multiple responses for the same
+prompt. Available reward modes are:
 
-# Requires an installed, compatible verl environment.
-bash rl/verl/run_grpo.sh --config rl/verl/configs/grpo_formal.yaml
-```
+| Mode | Meaning |
+| --- | --- |
+| exact | one only for an exact target SID |
+| sid_hier | weighted match of the semantic RQ levels |
+| semantic | valid-item embedding similarity mapped to a stable range |
+| hybrid | exact reward, otherwise hierarchical plus semantic reward |
 
-The generated native overrides include:
+The training rollout remains native to verl; invalid or unmapped SIDs receive
+zero reward. Evaluation uses the catalog Trie and deterministic constrained
+beam search.
 
-```text
-algorithm.adv_estimator=grpo
-actor_rollout_ref.rollout.n=8       # formal; 4 in smoke
-actor_rollout_ref.actor.ppo_epochs=1
-actor_rollout_ref.actor.clip_ratio=0.2
-actor_rollout_ref.actor.use_kl_loss=true
-actor_rollout_ref.actor.kl_loss_coef=1e-3
-```
+### Legacy Compatibility Path
 
-Thus `pi_old` is the rollout policy snapshot and `pi_ref` is the separate KL
-anchor.  The production implementation is native verl; the CPU helper in
-`rl/verl/grpo_math.py` only verifies the ratio/clipping semantics:
+scripts/rl.py and minionerec/trainer.py are retained as
+legacy_group_relative_rl for reproducing the original MiniOneRec-style
+training path. New experiments should use the native verl launcher.
 
-$$
-r_t = \exp(\log\pi_\theta - \log\pi_{\mathrm{old}}),\qquad
-A_i = \frac{R_i-\mu_R}{\sigma_R+\epsilon}.
-$$
+## Evaluation
 
-The launcher accepts `ppo_epochs: 1` or `2` in the config and writes the
-resolved configuration beside the run output.  It never falls back to the
-legacy trainer when `verl` is unavailable.
+MM-OneRec provides a deterministic full-catalog evaluation pipeline. For each
+held-out user state, the generator produces a beam of Semantic IDs, the Trie
+maps valid paths back to catalog items, and the evaluator compares the ranked
+items with the next interaction.
 
-### Reward modes
+Supported reports include:
 
-`rl/verl/reward.py` provides four modes:
+- HR@5, HR@10, and HR@20
+- NDCG@5, NDCG@10, and NDCG@20
+- catalog coverage and invalid SID rate
+- head / mid / tail performance
+- collision-group versus non-collision targets
+- recommendation and first-prefix concentration diagnostics
 
-| Mode | Definition |
-|---|---|
-| `exact` | `1` only for exact target SID |
-| `sid_hier` | prefix match with normalized `0.5 / 0.3 / 0.2` layer weights |
-| `semantic` | valid predicted item cosine mapped from `[-1,1]` to `[0,1]` |
-| `hybrid` | exact `1`; otherwise `0.6 * sid_hier + 0.4 * semantic` |
+Run-specific predictions, checkpoints, logs, and metric files are kept outside
+the public source snapshot.
 
-Invalid/unmapped items have semantic reward `0`.  The reward function is
-loaded by verl through `reward.custom_reward_function.path`; weights are kept
-in configuration rather than trainer code.  Training rollout is intentionally
-unconstrained in this version: invalid SID gets zero reward.  Evaluation keeps
-the existing Trie prefix constraint, and the launcher refuses a request for a
-vLLM monkey patch.
+## Quick Start
 
-## 5. Evaluation and preserved formal artifacts
+The commands below show the public entry points. Replace the data paths with
+local Amazon metadata, image manifests, SID files, and generator checkpoints.
 
-The evaluator reports HR@5/10/20, NDCG@5/10/20, coverage, invalid-SID rate
-and head/mid/tail buckets.  Existing formal artifacts use Amazon23
-`Industrial_and_Scientific_1m`, the complete 7,974-row test split, 20-beam Trie
-decoding and the same metric script for all four checkpoints.
+1. Encode item content:
 
-| Existing artifact | HR@5 | HR@10 | HR@20 | NDCG@5 | NDCG@10 | NDCG@20 | Coverage | Tail HR@10 | Invalid SID |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Text-SID + SFT | 0.000878 | 0.001129 | 0.003261 | 0.000566 | 0.000641 | 0.001181 | 0.006806 | 0.000627 | 0.0 |
-| Text-SID + legacy RL | 0.000627 | 0.001379 | 0.003762 | 0.000325 | 0.000554 | 0.001171 | 0.004671 | 0.001046 | 0.0 |
-| SigLIP-MM-SID + SFT | 0.000251 | 0.001630 | 0.007775 | 0.000103 | 0.000530 | 0.002067 | 0.006940 | 0.000418 | 0.0 |
-| SigLIP-MM-SID + legacy RL | 0.000376 | 0.002508 | 0.007650 | 0.000160 | 0.000830 | 0.002129 | 0.004137 | 0.000418 | 0.0 |
+   ~~~bash
+   bash scripts/mm/encode_qwen3vl.sh --help
+   ~~~
 
-### Qwen3-4B Q6/Q7/Q8 tokenizer ablation
+2. Train or export a Semantic-ID tokenizer:
 
-These runs use the same full-parameter Qwen3-4B SFT configuration (seed 42,
-one epoch, effective batch 32, cutoff 256) and deterministic 20-beam
-Trie-constrained decoding on all 7,974 test rows.
+   ~~~bash
+   python scripts/mm/run_rq_ablation.py --help
+   bash scripts/mm/build_sid.sh --help
+   ~~~
 
-| Tokenizer | Raw collision | HR@5 | HR@10 | HR@20 | NDCG@5 | NDCG@10 | NDCG@20 | Coverage | Invalid SID |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Q6, `64^3` | 0.130522 | 0.004891 | 0.007274 | 0.009782 | 0.003104 | 0.003850 | 0.004477 | 0.007340 | 0.0 |
-| Q7, `128^3` | 0.055785 | **0.008277** | **0.010660** | 0.015300 | **0.004969** | **0.005736** | **0.006911** | 0.004938 | 0.0 |
-| Q8, `256^3` | **0.030962** | 0.005016 | 0.009782 | **0.016805** | 0.002277 | 0.003806 | 0.005592 | 0.004271 | 0.0 |
+3. Build recommendation samples and run SFT:
 
-The lower raw collision rate does not automatically improve collided targets:
-collision-group HR@10 is `0.0` for Q6, Q7 and Q8.  Q7 is the primary tokenizer
-for the next RL comparison because it has the strongest HR@5/10 and NDCG@5/10;
-Q8 is retained as the higher-resolution runner-up because it has the best
-HR@20.  Full precision metrics, long-tail buckets and collision-group fields
-are in `results/qwen3_4b_sft_summary.csv`.
+   ~~~bash
+   bash scripts/mm/train_sft.sh \
+     --base_model <generator-checkpoint> \
+     --train_file <sid-train.csv> \
+     --eval_file <sid-valid.csv> \
+     --sid_index_path <sid-index.json> \
+     --output_dir outputs/local_sft
+   ~~~
 
-Full precision values and all head/mid/tail fields remain in
-[`results/summary.csv`](results/summary.csv); prediction/config artifacts are
-under `outputs/formal_amazon23_1m/`.  These numbers are not reused as
-Qwen3-VL or native-verl results.
+4. Evaluate with constrained beam search:
 
-## 6. Tests and dependencies
+   ~~~bash
+   bash scripts/mm/evaluate.sh \
+     --base_model outputs/local_sft/final_checkpoint \
+     --train_file <sid-train.csv> \
+     --info_file <catalog-info.tsv> \
+     --category Industrial_and_Scientific \
+     --test_data_path <sid-test.csv> \
+     --result_json_data outputs/local_eval/predictions.json \
+     --num_beams 20 --max_new_tokens 8
+   ~~~
 
-The CPU test suite covers image/SID alignment, pooling masks, missing-image
-behavior, PCA shape, reward ordering, collision suffix handling, GRPO ratio
-diagnostics, parquet schema, and train-only alignment.  Run:
+5. Optionally prepare parquet data and launch native GRPO:
 
-```bash
+   ~~~bash
+   python -m rl.verl.prepare_data --help
+   bash rl/verl/run_grpo.sh --config rl/verl/configs/grpo_small.yaml
+   ~~~
+
+Every entry point supports --help; smoke helpers under scripts/mm/ and tests/
+provide smaller checks before a full run.
+
+## Project Structure
+
+~~~text
+MM-OneRec/
+├── multimodal/        # Qwen3-VL, SigLIP baseline, and RecAlign
+├── rq/                # RQ-VAE and RQ-KMeans tokenization
+├── minionerec/        # datasets, Trie, legacy trainer, and SASRec
+├── scripts/           # SFT and evaluation entry points
+├── scripts/mm/        # image, SID, diagnostics, and evaluation utilities
+├── rl/verl/           # native GRPO data conversion and launcher
+├── tests/              # unit and regression tests
+├── config/             # runtime configuration examples
+└── docs/               # environment and implementation notes
+~~~
+
+## Tests
+
+Run the CPU regression suite from the repository root:
+
+~~~bash
 python -m pytest -q
-```
+~~~
 
-The current checkout result is `59 passed, 3 skipped`.  Install the optional
-native tracks in a compatible environment with:
+The tests cover tokenizer extension, multimodal item ordering, missing-image
+handling, pooling masks, PCA shapes, SID rewards, collision suffixes, parquet
+conversion, and the shared Trie/evaluator utilities.
 
-```bash
-pip install -r requirements.verl.txt
-```
+## Attribution
 
-`verl` and the Qwen3-VL model weights are deliberately not bundled in the
-repository.  The existing baseline environment and artifacts remain usable
-without them.
-
-## 7. Layout
-
-```text
-multimodal/
-  image_downloader.py       image cache and manifest
-  image_encoder.py          SigLIP baseline vision encoder
-  multimodal_encoder.py     SigLIP fusion baseline
-  qwen3_vl_encoder.py       frozen joint Qwen3-VL representations
-  rec_alignment.py          train-only recommendation projector
-rl/verl/
-  prepare_data.py           interaction CSV -> parquet
-  reward.py                 exact/hier/semantic/hybrid rewards
-  grpo_math.py              CPU ratio/clip diagnostics
-  run_grpo.py               native verl launcher
-  configs/                  smoke/formal configs
-rq/                         RQ-VAE and RQ-KMeans
-minionerec/                 data, legacy trainer, Trie and SASRec
-scripts/mm/                 baseline image/SID/evaluation commands
-outputs/formal_amazon23_1m/ preserved formal artifacts
-results/summary.csv         preserved comparable summary
-docs/EXPERIMENT_LOG.md      run provenance
-docs/INTERVIEW_GUIDE.md     implementation-focused explanations
-```
-
-## 8. Attribution
-
-MM-OneRec is based on and adapted from MiniOneRec.  The original license and
-attribution are retained in [`LICENSE`](LICENSE).
+MM-OneRec is based on and adapted from MiniOneRec. The original license and
+attribution are retained in LICENSE.

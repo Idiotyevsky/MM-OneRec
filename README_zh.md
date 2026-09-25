@@ -1,196 +1,270 @@
-# MM-OneRec：多模态 Semantic ID 生成式推荐
+# MM-OneRec：多模态 Semantic ID 生成式推荐系统
 
-MM-OneRec 保持 MiniOneRec 的推荐任务定义不变：输入用户历史 Semantic ID，生成下一商品的 Semantic ID。当前仓库同时保留原有 Text-SID、SigLIP-MM、SFT、legacy RL、Trie 解码和 Amazon23 正式结果，并新增标准 verl GRPO 入口、冻结 Qwen3-VL Item Representation，以及可选的推荐感知对齐。
+MM-OneRec 将序列推荐建模为 Semantic ID 的自回归生成：先用多模态模型
+构建商品表征，再通过 RQ-VAE 离散化，最后由 Qwen3-4B 根据用户历史 SID
+生成下一商品。
 
-```text
-Amazon 商品：title / description / image
-        ↓
-Text-only | SigLIP-MM | Qwen3-VL-MM | Qwen3-VL-RecAlign
-        ↓
-同一套 RQ-VAE → Semantic ID → Qwen SFT → verl GRPO
-        ↓
-Trie-constrained Beam Search → HR / NDCG / Coverage / Tail
-```
+~~~text
+Title + Description + Image
+            │
+            ▼
+      冻结的 Qwen3-VL
+            │
+            ▼
+        PCA / L2 norm
+            │
+            ▼
+          RQ-VAE
+            │
+  <a_i><b_j><c_k>[<d_n>]
+            │
+            ▼
+        Qwen3-4B
+        SFT → GRPO
+            │
+            ▼
+ Trie-constrained Beam Search
+            │
+            ▼
+        Top-K 推荐
+~~~
 
-## 实验状态
+## 项目要点
 
-| Track | SID | SFT | RL | Eval |
-|---|:---:|:---:|---|:---:|
-| Text baseline | ✓ | ✓ | legacy RL | ✓ |
-| SigLIP-MM baseline | ✓ | ✓ | legacy RL | ✓ |
-| Text/SigLIP + native verl GRPO | ✓ | ✓ | launcher ready | 未运行 |
-| Qwen3VL-MM | 编码器已完成；RQ ablation 与候选 SID 已导出 | 下游 SFT 未运行 | 未运行 | 未运行 |
-| Qwen3VL-RecAlign | 对齐代码已实现 | 未运行 | 未运行 | 未运行 |
+- **多模态商品表征**：冻结 Qwen3-VL，联合编码商品标题、描述和图片。
+- **层次化 Semantic ID**：使用多级残差量化，把连续商品向量转成可生成的
+  离散 token 序列。
+- **生成式推荐**：Qwen3-4B 根据用户按时间排序的历史 SID 预测下一商品 SID。
+- **推荐后训练**：支持监督微调和基于原生 verl 的 GRPO，包括组内相对奖励、
+  clipped policy update 和 reference KL。
+- **合法生成**：评估阶段使用 SID 前缀 Trie 约束 beam search，使候选能够映射
+  回商品目录。
+- **完整目录评估**：支持确定性 full-catalog 评估、排序指标、覆盖率、合法性和
+  long-tail 分析。
 
-表中的正式结果只来自仓库已有 `outputs/formal_amazon23_1m/` 文件，不将旧结果代替新 track 的结果。
+## 多模态商品表征
 
-## 1. Item Representation
+### Qwen3-VL
 
-### SigLIP baseline
+multimodal/qwen3_vl_encoder.py 默认使用冻结的
+Qwen/Qwen3-VL-4B-Instruct。有图片时，模型接收图片、title 和 description；
+缺图时仍使用同一个 Qwen3-VL，只发送文本，不切换到另一种 embedding space。
 
-`multimodal/text_encoder.py`、`multimodal/image_encoder.py` 和
-`multimodal/multimodal_encoder.py` 实现原有可复现 baseline：
+默认 last_token pooling 读取联合图文上下文之后最后一个有效文本位置，也可以
+使用 text_mean 做对照。编码结果同时保存 item ID、has_image mask、模型信息和
+投影信息；可用只基于商品内容拟合的 PCA 将原始 hidden dimension 投影到 768D。
 
-```text
-title + description → frozen SigLIP text tower
-image               → frozen SigLIP vision tower
+~~~bash
+bash scripts/mm/encode_qwen3vl.sh \
+  --items <item-metadata.json> \
+  --manifest <cached-image-manifest.jsonl> \
+  --output data/embeddings/items.qwen3vl.npy \
+  --model Qwen/Qwen3-VL-4B-Instruct \
+  --pooling last_token \
+  --projection pca --target-dim 768 \
+  --batch-size 4 --device cuda:0
+~~~
+
+仓库同时保留 SigLIP baseline。其可解释的加权融合为：
+
+~~~text
 e_mm = normalize(0.7 * normalize(e_text) + 0.3 * normalize(e_image))
-```
+~~~
 
-图片由 `multimodal/image_downloader.py` 下载并缓存。缺图通过 mask 记录，SigLIP weighted fusion 回退到 text vector。
+### Recommendation-aware Alignment
 
-### Qwen3-VL joint representation
+multimodal/rec_alignment.py 冻结 Qwen3-VL，只训练轻量 projector：
 
-`multimodal/qwen3_vl_encoder.py` 默认使用 `Qwen/Qwen3-VL-4B-Instruct`，模型 frozen，只做一次 representation extraction，不训练 VLM。输入 prompt 固定为商品 title、description 和可选的 category/brand 等字段。默认 `last_token` pooling 使用 attention mask 取最后一个有效文本位置，也支持 `text_mean`。
-
-缺图时仍调用同一个 Qwen3-VL，仅输入文本，不回退到 SigLIP embedding space。输出保存：
-
-```text
-*.npy
-*.npy.json
-*.item_ids.json
-*.has_image.npy
-```
-
-如需和 SigLIP 的 768D 下游配置公平对照，可以使用仅基于 item content 的 PCA：
-
-```bash
-python -m multimodal.qwen3_vl_encoder \
-  --items data/Amazon/index/Industrial_and_Scientific.item.json \
-  --manifest data/cache/amazon23_1k/images.jsonl \
-  --output data/embeddings/industrial.qwen3vl.npy \
-  --projection pca --target-dim 768 --pooling last_token \
-  --model Qwen/Qwen3-VL-4B-Instruct
-```
-
-### Recommendation-aware alignment
-
-`multimodal/rec_alignment.py` 冻结 Qwen3-VL，只训练轻量：
-
-```text
+~~~text
 Linear → GELU → Linear → L2 Normalize
-```
+~~~
 
-User representation 是历史商品向量的 recency pooling，训练目标是 sampled-negative InfoNCE。行为监督只读取 `--train-csv`，不会读取 valid/test target。得到的 128D/256D 向量可命名为 `Qwen3VL-RecAlign-SID`，继续走同一 RQ-VAE 和推荐链路。
+用历史商品向量的 recency pooling 构造 user vector，再以 sampled-negative
+InfoNCE 对齐训练集中的下一商品。得到的 item vector 继续使用同一套 RQ-VAE 和
+生成式推荐链路。
 
-## 2. Semantic ID
+## Semantic ID
 
-所有 representation track 都使用相同的：
+所有 representation track 都遵循统一路径：
 
-```text
-Item embedding → RQ-VAE / RQ-KMeans → SID index → SID CSV
-              → Qwen SFT → RL → Trie evaluator
-```
+~~~text
+item embedding
+    ↓
+RQ-VAE / RQ-KMeans
+    ↓
+SID index 与 interaction CSV
+    ↓
+Qwen SFT → RL post-training → Trie evaluation
+~~~
 
-默认 codebook capacity 仍为 32/32/32、latent dimension 64。SID 导出会记录 total items、raw unique SID、raw collision 和 deduplicated collision。碰撞消歧用的 `<d_n>` 不是语义 RQ 层，新 reward 不会给它额外层级权重。
+RQ-VAE 残差量化生成类似下面的层次 code：
 
-针对固定的 Qwen3-VL PCA-768 表征，本轮还完成了 latent=128、Sinkhorn epsilon=0.003 的容量对照：`64^3`、`128^3`、`256^3`（Q6/Q7/Q8）的 raw collision rate 分别为 `0.130522`、`0.055785`、`0.030962`。逐层 codebook 统计与 prefix 样例见 `docs/EXPERIMENT_LOG.md`；这些仍是进入统一下游 evaluator 前的 RQ tokenizer 候选。
+~~~text
+<a_i><b_j><c_k>
+~~~
 
-## 3. SFT 与 RL
+实现支持 64^3、128^3、256^3 等受控 codebook capacity 对照，并可通过
+scripts/mm/analyze_codebook.py 检查 codebook utilization、entropy、perplexity、
+prefix diversity、重构质量和 raw SID collision。
 
-### SFT
+当多个商品共享完整 raw RQ path 时，导出阶段增加确定性的碰撞消歧 suffix：
 
-`scripts/sft.py` 保持原有 generator。Item representation 只影响 Item → SID，不把图片或 VLM hidden state 直接拼入 Qwen prompt。训练目标为：
+~~~text
+<a_i><b_j><c_k><d_n>
+~~~
 
-```text
-P(next SID | history SID)
-```
+<d_n> 是寻址后缀，不是第四个语义 RQ 层。没有碰撞的商品在三个语义 token
+之后结束；碰撞组只使用所需数量的 suffix。Trie 和 tokenizer 会处理该后缀，
+层次语义 reward 则不把它当作新的量化层。
 
-### Legacy RL
+## 生成式推荐
 
-`scripts/rl.py` 和 `minionerec/trainer.py` 保留为 `legacy_group_relative_rl`，用于复现旧结果。它们的 policy term 使用 detached self-ratio，并不是严格的 `pi_theta / pi_old` clipped surrogate。旧 artifact 不删除，但新标准训练不再从这里启动。
+### Qwen3-4B SFT
 
-### Native verl GRPO
+核心任务保持为：
 
-新入口为 `rl/verl/run_grpo.sh`，由 `verl.trainer.main_ppo` 负责 rollout、old-policy log-prob、clipped policy loss、reference KL 和 optimizer update：
+~~~text
+用户历史 SID 序列 → 下一商品 SID
+~~~
 
-```bash
-python -m rl.verl.prepare_data \
-  --interactions data/Amazon/train/Industrial_and_Scientific_5_2016-10-2018-11.csv \
-  --output data/verl/industrial/train.parquet \
-  --dataset Amazon23 --category Industrial_and_Scientific
+多模态信息在推荐训练前进入 Item → SID 阶段，图片和 VLM hidden state 不直接
+拼入 Qwen prompt。SID token 会作为 atomic token 加入 tokenizer，并同步扩展
+模型词表。训练只对目标 token 计算 causal language-model loss。
 
-python -m rl.verl.run_grpo \
-  --config rl/verl/configs/grpo_small.yaml --dry-run
+入口是 scripts/sft.py，shell wrapper 为 scripts/mm/train_sft.sh。
 
-# 安装兼容 verl 后运行正式配置
-bash rl/verl/run_grpo.sh --config rl/verl/configs/grpo_formal.yaml
-```
+### Trie-constrained Decoding
 
-核心配置：
+minionerec/logit_processor.py 根据 catalog SID index 构造前缀映射，每一步只
+允许当前合法 prefix 的 child token。这样 beam search 可以返回多个目录内商品，
+同时避免生成无法映射的 SID 路径。
 
-```text
-algorithm.adv_estimator=grpo
-actor_rollout_ref.rollout.n=8       # formal；smoke 为 4
-actor_rollout_ref.actor.ppo_epochs=1
-actor_rollout_ref.actor.clip_ratio=0.2
-actor_rollout_ref.actor.use_kl_loss=true
-actor_rollout_ref.actor.kl_loss_coef=1e-3
-```
+## 推荐后训练
 
-$$
-r_t=\exp(\log\pi_\theta-\log\pi_{\mathrm{old}}),\qquad
-A_i=\frac{R_i-\mu_R}{\sigma_R+\epsilon}.
-$$
+### 原生 verl GRPO
 
-`pi_old` 是 rollout policy snapshot，`pi_ref` 是独立的 KL anchor。配置支持 `ppo_epochs=1/2`，每次 run 会在输出目录保存解析后的 config。当前训练 rollout 不做 Trie monkey patch：无效 SID reward 为 0，评估阶段继续使用现有 Trie constrained decoding。
+推荐的 RL 入口是 rl/verl/run_grpo.py 或 rl/verl/run_grpo.sh。rollout、
+old-policy log probability、clipped policy update 和 optimizer state 由原生
+verl 管理。配置明确区分：
 
-## 4. Reward
+~~~text
+pi_old  = 产生 rollout 的策略
+pi_ref  = 用于 KL regularization 的 reference model
+~~~
 
-`rl/verl/reward.py` 提供四种 mode：
+每个 prompt 采样多个 response，使用组内 reward 计算相对 advantage。当前提供：
 
-| mode | 定义 |
-|---|---|
-| `exact` | 预测 SID 与 target 完全一致为 1，否则 0 |
-| `sid_hier` | 真实 RQ 层 prefix 权重 `0.5 / 0.3 / 0.2` |
-| `semantic` | 合法预测商品与 GT 的 cosine 映射到 `[0,1]` |
-| `hybrid` | exact 为 1，否则 `0.6 * sid_hier + 0.4 * semantic` |
+| mode | 含义 |
+| --- | --- |
+| exact | 完整 SID 匹配时为 1 |
+| sid_hier | 按真实 RQ 层计算 prefix 匹配 |
+| semantic | 合法预测商品与 GT 的 embedding 相似度 |
+| hybrid | exact，否则组合层次 reward 与 semantic reward |
 
-reward 通过 `reward.custom_reward_function.path` 加载，不在 trainer 中 hard-code。invalid/unmapped item 的 semantic reward 为 0。
+训练 rollout 保持 verl 原生流程；无效或无法映射的 SID 得到 0 reward。评估时
+继续使用 catalog Trie 和确定性 constrained beam search。
 
-## 5. 已有 Amazon23 正式结果
+### Legacy 兼容路径
 
-以下四行来自已有 `results/summary.csv`，使用相同的 Amazon23 `Industrial_and_Scientific_1m` 完整 test split（7,974 条）、20-beam Trie decoding 和指标脚本：
+scripts/rl.py 和 minionerec/trainer.py 作为 legacy_group_relative_rl 保留，
+用于复现 MiniOneRec 的旧训练路径。新的实验入口使用原生 verl launcher。
 
-| Track | HR@5 | HR@10 | HR@20 | NDCG@5 | NDCG@10 | NDCG@20 | Coverage | Tail HR@10 | Invalid SID |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Text-SID + SFT | 0.000878 | 0.001129 | 0.003261 | 0.000566 | 0.000641 | 0.001181 | 0.006806 | 0.000627 | 0.0 |
-| Text-SID + legacy RL | 0.000627 | 0.001379 | 0.003762 | 0.000325 | 0.000554 | 0.001171 | 0.004671 | 0.001046 | 0.0 |
-| SigLIP-MM-SID + SFT | 0.000251 | 0.001630 | 0.007775 | 0.000103 | 0.000530 | 0.002067 | 0.006940 | 0.000418 | 0.0 |
-| SigLIP-MM-SID + legacy RL | 0.000376 | 0.002508 | 0.007650 | 0.000160 | 0.000830 | 0.002129 | 0.004137 | 0.000418 | 0.0 |
+## 评估
 
-完整浮点数、head/mid/tail 分桶、预测和配置仍保存在 `results/summary.csv` 与 `outputs/formal_amazon23_1m/`。这些数字不代表 Qwen3-VL 或 native verl 的结果。
+MM-OneRec 提供确定性的 full-catalog 评估：对每个留出用户状态生成一组 SID，
+Trie 将合法路径映射回目录商品，再与下一次交互进行排序比较。
 
-## 6. 测试与依赖
+评估器支持：
 
-```bash
+- HR@5、HR@10、HR@20
+- NDCG@5、NDCG@10、NDCG@20
+- catalog coverage 与 invalid SID rate
+- head / mid / tail 分桶
+- collision-group 与 non-collision target
+- 推荐 item 和一级 prefix 的集中度诊断
+
+与具体运行相关的预测、checkpoint、日志和指标文件保存在公开源码快照之外。
+
+## Quick Start
+
+下面列出公开入口；请将路径替换为本地 Amazon metadata、图片 manifest、SID 文件
+和生成模型 checkpoint。
+
+1. 使用 Qwen3-VL 编码商品：
+
+   ~~~bash
+   bash scripts/mm/encode_qwen3vl.sh --help
+   ~~~
+
+2. 训练或导出 Semantic-ID tokenizer：
+
+   ~~~bash
+   python scripts/mm/run_rq_ablation.py --help
+   bash scripts/mm/build_sid.sh --help
+   ~~~
+
+3. 构造训练样本并运行 SFT：
+
+   ~~~bash
+   bash scripts/mm/train_sft.sh \
+     --base_model <generator-checkpoint> \
+     --train_file <sid-train.csv> \
+     --eval_file <sid-valid.csv> \
+     --sid_index_path <sid-index.json> \
+     --output_dir outputs/local_sft
+   ~~~
+
+4. 使用 Trie constrained beam search 评估：
+
+   ~~~bash
+   bash scripts/mm/evaluate.sh \
+     --base_model outputs/local_sft/final_checkpoint \
+     --train_file <sid-train.csv> \
+     --info_file <catalog-info.tsv> \
+     --category Industrial_and_Scientific \
+     --test_data_path <sid-test.csv> \
+     --result_json_data outputs/local_eval/predictions.json \
+     --num_beams 20 --max_new_tokens 8
+   ~~~
+
+5. 可选：准备 parquet 并启动原生 GRPO：
+
+   ~~~bash
+   python -m rl.verl.prepare_data --help
+   bash rl/verl/run_grpo.sh --config rl/verl/configs/grpo_small.yaml
+   ~~~
+
+所有入口都支持 --help；正式运行前可以使用 scripts/mm/ 下的 smoke helper
+和 tests/ 完成小规模检查。
+
+## 项目结构
+
+~~~text
+MM-OneRec/
+├── multimodal/        # Qwen3-VL、SigLIP baseline、RecAlign
+├── rq/                # RQ-VAE 与 RQ-KMeans tokenization
+├── minionerec/        # dataset、Trie、legacy trainer、SASRec
+├── scripts/           # SFT 与 evaluation 入口
+├── scripts/mm/        # 图片、SID、诊断和评估工具
+├── rl/verl/           # native GRPO 数据转换与 launcher
+├── tests/              # 单元测试与回归测试
+├── config/             # runtime 配置示例
+└── docs/               # 环境和实现说明
+~~~
+
+## 测试
+
+在仓库根目录运行：
+
+~~~bash
 python -m pytest -q
-```
+~~~
 
-当前 checkout 的结果为 `56 passed, 3 skipped`。新增 CPU 测试覆盖：Qwen3-VL mock item order、缺图路径、pooling mask、PCA shape、reward ordering、`<d_n>` suffix、GRPO ratio/clip、verl parquet schema 和 train-only alignment。
+测试覆盖 tokenizer extension、多模态 item order、缺图处理、pooling mask、
+PCA shape、SID reward、collision suffix、parquet conversion 以及共享 Trie/
+evaluator 工具。
 
-native verl / Qwen3-VL 环境可按需安装：
+## Attribution
 
-```bash
-pip install -r requirements.verl.txt
-```
-
-模型权重、verl 和生成的 embedding 不放入仓库；原有 SigLIP baseline 和正式 artifact 保持可用。
-
-## 7. 目录
-
-```text
-multimodal/                 SigLIP、Qwen3-VL、RecAlign
-rl/verl/                    parquet、reward、GRPO launcher/config
-rq/                         RQ-VAE / RQ-KMeans / SID
-minionerec/                 data、legacy trainer、Trie、SASRec
-scripts/mm/                 图片、SID、评估脚本
-outputs/formal_amazon23_1m/ 原有正式 artifact
-results/summary.csv         原有可比结果汇总
-docs/EXPERIMENT_LOG.md      实验 provenance
-docs/INTERVIEW_GUIDE.md     代码对应的实现说明
-```
-
-## 8. Attribution
-
-本项目基于并改造自 MiniOneRec，原项目 license 和 attribution 保留在 [`LICENSE`](LICENSE)。
+本项目基于并改造自 MiniOneRec，原项目 license 和 attribution 保留在
+LICENSE 中。

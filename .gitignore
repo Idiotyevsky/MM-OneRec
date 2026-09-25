@@ -16,6 +16,7 @@ build/
 dist/
 *.egg-info/
 
+
 # Virtual environments and local environment variables
 .venv/
 .venv-*/
@@ -25,6 +26,19 @@ env/
 .env.*
 !.env.example
 
+# Locally retained historical material and upstream-only artwork
+docs/INTERVIEW_GUIDE_LEGACY.md
+docs/OneRec_report.docx
+docs/material/
+assets/ChatGPT Image Apr 26, 2026, 11_57_26 PM_copy.png
+assets/alphalab.jpg
+assets/lds.png
+assets/llmmatter_big.png
+assets/minionerec_framework.png
+assets/minionerec_main_result.png
+assets/next.jpg
+assets/scaling_big.png
+
 # Editors and notebooks
 .idea/
 .vscode/
@@ -32,31 +46,38 @@ env/
 *.swo
 .ipynb_checkpoints/
 
-# Training, evaluation, and experiment outputs
-logs/
-*.log
-output_dir/
+# Experiment outputs and local run state
 results/
-!results/
-results/*
-!results/summary.csv
-!results/rq_ablation_qwen3vl.csv
-temp/
+outputs/
+logs/
 wandb/
 runs/
+output_dir/
+temp/
+tmp*/
+pymp-*/
+torchelastic_*/
+torchinductor_/
 
-# Local model/download caches
-.cache/
-**/.cache/
+# Run-specific experiment documents and metrics
+docs/EXPERIMENT_LOG*.md
+*_metrics.json
+*_summary.csv
+training_log.json
+trainer_state.json
 
-# Large generated model artifacts. Repository-provided fixtures remain versioned.
+# Local model checkpoints and downloaded weights
+checkpoints/
+checkpoints_local/
 *.safetensors
 *.bin
 *.ckpt
 *.pt
 *.pth
-!qwen/model.safetensors
-!checkpoints/model.safetensors
+
+# Local model/download caches
+.cache/
+**/.cache/
 
 # Generated local dataset workspaces
 data/Amazon18/
@@ -66,4 +87,3 @@ data/cache/
 data/processed/
 data/embeddings/
 data/sid/
-outputs/

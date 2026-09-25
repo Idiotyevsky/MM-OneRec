@@ -1,7 +1,6 @@
 # Implementation Guide
 
-This guide follows the code in the current repository.  The prior guide is
-preserved as [`INTERVIEW_GUIDE_LEGACY.md`](INTERVIEW_GUIDE_LEGACY.md).
+This guide follows the code in the current repository.  It focuses on the current implementation and public project structure.
 
 ## 1. Why use a generative recommender?
 
