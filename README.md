@@ -31,13 +31,13 @@ RQ/SID, generator, split and evaluator so their effects can be separated.
 | Text baseline | existing text embedding | yes | yes | legacy RL artifact | formal artifact |
 | SigLIP-MM baseline | normalized `0.7 * text + 0.3 * image` | yes | yes | legacy RL artifact | formal artifact |
 | Text/SigLIP + native verl GRPO | same baseline representations | launcher ready | data conversion ready | requires verl run | not run in this checkout |
-| Qwen3VL-MM | frozen joint VLM representation | RQ ablation + candidate SID exported | downstream SFT not run | not run | not run |
+| Qwen3VL-MM | frozen joint VLM representation | Q6/Q7/Q8 exported | Qwen3-4B Q6/Q7/Q8 complete | not run | Q6/Q7/Q8 complete |
 | Qwen3VL-RecAlign | frozen VLM + train-only projector | alignment code ready | not run | not run | not run |
 
-“Formal artifact” refers only to files already present under
-`outputs/formal_amazon23_1m/`; no Qwen3-VL downstream recommendation metric or
-native-verl metric is inferred from those files. Qwen3-VL RQ diagnostics and
-ablations are recorded in `docs/EXPERIMENT_LOG.md` and
+“Formal artifact” refers only to the recorded files under
+`outputs/formal_amazon23_1m/` and `outputs/qwen3_4b/`; native-verl metrics are
+still separate and have not been mixed into the SFT comparison. Qwen3-VL RQ
+diagnostics and ablations are recorded in `docs/EXPERIMENT_LOG.md` and
 `results/rq_ablation_qwen3vl.csv`.
 
 ## 2. Representation layer
@@ -134,9 +134,8 @@ For the fixed Qwen3-VL PCA-768 representation, the controlled capacity
 ablation also evaluates latent-128 `64^3`, `128^3`, and `256^3` codebooks
 (Q6/Q7/Q8) with Sinkhorn epsilon `0.003`. Their raw collision rates are
 `0.130522`, `0.055785`, and `0.030962`, respectively; codebook diagnostics
-and prefix samples are recorded in `docs/EXPERIMENT_LOG.md`. These are RQ-only
-candidate tokenizers until they are passed through the common downstream
-evaluator.
+and prefix samples are recorded in `docs/EXPERIMENT_LOG.md`. They are evaluated
+downstream below with one fixed Qwen3-4B generator and one fixed protocol.
 
 ## 4. Training
 
@@ -234,6 +233,25 @@ decoding and the same metric script for all four checkpoints.
 | SigLIP-MM-SID + SFT | 0.000251 | 0.001630 | 0.007775 | 0.000103 | 0.000530 | 0.002067 | 0.006940 | 0.000418 | 0.0 |
 | SigLIP-MM-SID + legacy RL | 0.000376 | 0.002508 | 0.007650 | 0.000160 | 0.000830 | 0.002129 | 0.004137 | 0.000418 | 0.0 |
 
+### Qwen3-4B Q6/Q7/Q8 tokenizer ablation
+
+These runs use the same full-parameter Qwen3-4B SFT configuration (seed 42,
+one epoch, effective batch 32, cutoff 256) and deterministic 20-beam
+Trie-constrained decoding on all 7,974 test rows.
+
+| Tokenizer | Raw collision | HR@5 | HR@10 | HR@20 | NDCG@5 | NDCG@10 | NDCG@20 | Coverage | Invalid SID |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Q6, `64^3` | 0.130522 | 0.004891 | 0.007274 | 0.009782 | 0.003104 | 0.003850 | 0.004477 | 0.007340 | 0.0 |
+| Q7, `128^3` | 0.055785 | **0.008277** | **0.010660** | 0.015300 | **0.004969** | **0.005736** | **0.006911** | 0.004938 | 0.0 |
+| Q8, `256^3` | **0.030962** | 0.005016 | 0.009782 | **0.016805** | 0.002277 | 0.003806 | 0.005592 | 0.004271 | 0.0 |
+
+The lower raw collision rate does not automatically improve collided targets:
+collision-group HR@10 is `0.0` for Q6, Q7 and Q8.  Q7 is the primary tokenizer
+for the next RL comparison because it has the strongest HR@5/10 and NDCG@5/10;
+Q8 is retained as the higher-resolution runner-up because it has the best
+HR@20.  Full precision metrics, long-tail buckets and collision-group fields
+are in `results/qwen3_4b_sft_summary.csv`.
+
 Full precision values and all head/mid/tail fields remain in
 [`results/summary.csv`](results/summary.csv); prediction/config artifacts are
 under `outputs/formal_amazon23_1m/`.  These numbers are not reused as
@@ -249,7 +267,7 @@ diagnostics, parquet schema, and train-only alignment.  Run:
 python -m pytest -q
 ```
 
-The current checkout result is `56 passed, 3 skipped`.  Install the optional
+The current checkout result is `59 passed, 3 skipped`.  Install the optional
 native tracks in a compatible environment with:
 
 ```bash

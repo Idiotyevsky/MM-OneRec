@@ -281,11 +281,11 @@ reaches `5.5785%`, and Q8 reaches `3.0962%`.  Q7 improves reconstruction from
 at epoch 19 for all three capacity runs; later reconstruction improvements are
 accompanied by collision worsening (Q7 final-eval `8.4746%`, Q8 `4.9780%`).
 
-Q8 is the current RQ-only minimum-collision candidate, while Q7 is the more
+Q8 is the RQ-only minimum-collision candidate, while Q7 is the more
 conservative semantic-granularity candidate: all three Q7 layers remain fully
 utilized and its first-level prefix has 128 branches, whereas Q8 has 256 first-level
-branches and 5,535 unique two-level prefixes.  Neither candidate has yet been
-promoted to downstream SFT/GRPO or recommendation metrics in this round.
+branches and 5,535 unique two-level prefixes.  Both candidates were subsequently
+passed through the common Qwen3-4B SFT/evaluation protocol below.
 
 ### Semantic prefix inspection
 
@@ -356,6 +356,33 @@ constrained catalog SID.  Its artifacts are under
 
 Full-test evaluation uses the same `scripts/evaluate.py` protocol for all
 tracks: 7,974 rows, 20 beams, `max_new_tokens=8`, and Trie-constrained SID
-generation.  At log creation time the three jobs were running under
-`outputs/qwen3_4b/q{6,7,8}_sft_eval/`; recommendation metrics will be appended
-only after their prediction files and metric JSON artifacts are complete.
+generation.  The final evaluation uses deterministic generation
+(`do_sample=False`, `use_model_defaults=False`) and is stored under
+`outputs/qwen3_4b/q{6,7,8}_sft_eval_beam20_deterministic/`.  The earlier
+sampling/evaluation attempts remain as separate artifacts and are not included
+in the table below.
+
+### Q6/Q7/Q8 full-test recommendation metrics
+
+All values below are computed from the complete 7,974-row prediction files by
+`scripts/mm/evaluate_metrics.py`.  `invalid_sid_rate` is zero for all three
+tracks.
+
+| Track | Raw collision | HR@5 | HR@10 | HR@20 | NDCG@5 | NDCG@10 | NDCG@20 | Coverage |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Q6 (`64^3`) | 0.130522 | 0.004891 | 0.007274 | 0.009782 | 0.003104 | 0.003850 | 0.004477 | 0.007340 |
+| Q7 (`128^3`) | 0.055785 | **0.008277** | **0.010660** | 0.015300 | **0.004969** | **0.005736** | **0.006911** | 0.004938 |
+| Q8 (`256^3`) | **0.030962** | 0.005016 | 0.009782 | **0.016805** | 0.002277 | 0.003806 | 0.005592 | 0.004271 |
+
+The lower raw collision rate does not by itself solve collided targets.  The
+collision-group sample counts are Q6/Q7/Q8 = `1,971 / 822 / 497`, and
+collision-group HR@10 and NDCG@10 are `0.0 / 0.0` for every track.  Q7 has the
+strongest HR@5/10 and NDCG@5/10 and is therefore the primary tokenizer for the
+next RL comparison.  Q8 is retained as the higher-resolution runner-up because
+it has the best HR@20.  No GRPO run was started from these checkpoints in this
+round.
+
+The complete-precision artifact is
+`results/qwen3_4b_sft_summary.csv`; each row also contains head/mid/tail and
+collision/non-collision fields.  SFT was trained with code commit `fa4d950`;
+the deterministic evaluation fix and final metrics use commit `d77c828`.

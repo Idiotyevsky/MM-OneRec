@@ -1,0 +1,18 @@
+{
+  "items": 7493,
+  "three_token_items": 7092,
+  "four_token_items": 401,
+  "other_length_items": 0,
+  "three_token_proportion": 0.9464833844921927,
+  "four_token_proportion": 0.053516615507807286,
+  "average_sid_length": 3.0535166155078075,
+  "max_collision_group_size": 23,
+  "raw_unique_sid": 7261,
+  "raw_collision_count": 232,
+  "raw_collision_rate": 0.030962231415988254,
+  "suffix_token_count": 23,
+  "length_distribution": {
+    "3": 7092,
+    "4": 401
+  }
+}
