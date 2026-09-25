@@ -212,6 +212,7 @@ def main(
                 torch.tensor(padding_encodings["input_ids"]).to(device),
                 attention_mask=torch.tensor(attention_mask).to(device),
                 generation_config=generation_config,
+                use_model_defaults=False,
                 return_dict_in_generate=True,
                 output_scores=True,
                 logits_processor=logits_processor,
