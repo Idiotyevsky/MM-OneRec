@@ -1,4 +1,4 @@
-"""Compute ranking, coverage, validity, and frequency-bucket metrics."""
+"""Compute ranking, coverage, validity, and recommendation concentration metrics."""
 
 from __future__ import annotations
 
@@ -44,7 +44,10 @@ def evaluate(
     if sid_index:
         collision_counts.update("".join(map(str, tokens[:3])) for tokens in sid_index.values())
     metrics: dict[str, float | int] = {"samples": len(rows)}
-    recommended: set[str] = set(); invalid = total_predictions = 0
+    recommended: set[str] = set()
+    valid_item_counts: Counter[str] = Counter()
+    valid_prefix_counts: Counter[str] = Counter()
+    invalid = total_predictions = 0
     for k in ks:
         hits = ndcgs = 0.0
         bucket_hits = Counter(); bucket_ndcgs = Counter(); bucket_totals = Counter()
@@ -80,10 +83,31 @@ def evaluate(
             metrics["tail_ndcg@10"] = metrics["ndcg@10_tail"]
     for row in rows:
         predictions = [str(value) for value in row["predictions"]]
-        recommended.update(value for value in predictions if value in catalog)
-        invalid += sum(value not in catalog for value in predictions); total_predictions += len(predictions)
+        for value in predictions:
+            if value in catalog:
+                recommended.add(value)
+                valid_item_counts[value] += 1
+                prefix = re.match(r"<a_\d+>", value)
+                if prefix:
+                    valid_prefix_counts[prefix.group(0)] += 1
+            else:
+                invalid += 1
+        total_predictions += len(predictions)
     metrics["coverage"] = len(recommended) / len(catalog) if catalog else 0.0
     metrics["invalid_sid_rate"] = invalid / total_predictions if total_predictions else 0.0
+    # Concentration is measured over valid beam slots (normally all slots for
+    # Trie-constrained evaluation), not over unique users.  This makes the
+    # denominator explicit and comparable across runs with different validity.
+    valid_slots = sum(valid_item_counts.values())
+    top20_items = sum(count for _, count in valid_item_counts.most_common(20))
+    top20_prefixes = sum(count for _, count in valid_prefix_counts.most_common(20))
+    metrics["unique_recommended_items"] = len(recommended)
+    metrics["valid_recommendation_slots"] = valid_slots
+    metrics["top20_item_count"] = min(20, len(valid_item_counts))
+    metrics["top20_item_share"] = top20_items / valid_slots if valid_slots else 0.0
+    metrics["unique_a_prefixes"] = len(valid_prefix_counts)
+    metrics["top20_a_prefix_count"] = min(20, len(valid_prefix_counts))
+    metrics["top20_a_prefix_share"] = top20_prefixes / valid_slots if valid_slots else 0.0
     return metrics
 
 

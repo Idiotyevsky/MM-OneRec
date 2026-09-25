@@ -63,5 +63,19 @@ def test_collision_group_metrics_ignore_disambiguation_suffix() -> None:
     assert metrics["hr@10_non_collision"] == 1.0
 
 
+def test_recommendation_concentration_metrics_use_valid_beam_slots() -> None:
+    rows = [
+        {"target": "<a_0>", "predictions": ["<a_0>", "<a_0>", "<a_1>", "bad"]},
+        {"target": "<a_1>", "predictions": ["<a_0>", "<a_2>", "<a_2>", "bad"]},
+    ]
+    metrics = evaluate(rows, {"<a_0>", "<a_1>", "<a_2>"}, ["<a_0>", "<a_1>", "<a_2>"])
+    assert metrics["unique_recommended_items"] == 3
+    assert metrics["valid_recommendation_slots"] == 6
+    assert metrics["top20_item_count"] == 3
+    assert metrics["top20_item_share"] == 1.0
+    assert metrics["unique_a_prefixes"] == 3
+    assert metrics["top20_a_prefix_share"] == 1.0
+
+
 def test_item_text_handles_list_description() -> None:
     assert item_text({"title": "Widget", "description": ["red", "small"]}) == "Title: Widget. Description: red small"
