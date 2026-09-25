@@ -308,3 +308,54 @@ selected capacity candidates.  The artifact paths are:
 The Q7/Q8 capacity runs used commit `79b9b16` as their code base, host
 `4090-1` / `CUDA_VISIBLE_DEVICES=0`, the fixed Qwen3-VL PCA-768 embedding,
 seed `2024`, 100-epoch maximum, and no z-score preprocessing.
+
+## 2026-09-25 — Qwen3-4B Q6/Q7/Q8 SFT comparison
+
+This run tests the downstream effect of the three fixed Qwen3-VL RQ-VAE
+capacity candidates.  The interaction rows were generated independently for
+each index and compared with `scripts/mm/compare_sid_csv.py`; train/valid/test
+contain exactly `63,788 / 7,973 / 7,974` rows in all tracks, with identical
+user/history/target item columns and zero missing items.
+
+| Field | Value |
+|---|---|
+| dataset | Amazon Reviews 2023, `Industrial_and_Scientific_1m` |
+| splits | train 63,788; valid 7,973; test 7,974 |
+| item representation | fixed Qwen3-VL PCA-768 embedding |
+| generator | `Qwen/Qwen3-4B-Instruct-2507` |
+| SFT | full-parameter BF16, seed 42, 1 epoch, lr `1e-5`, effective batch 32, micro batch 1, cutoff 256, rec repeat 2 |
+| auxiliary mixture | recommendation fraction `0.6179` on full data; SID/title and fusion auxiliary tasks retained |
+| checkpoint policy | model-only checkpoints, minimum validation loss rule, independent output directory per tokenizer |
+| GPUs | Q6 CUDA 0, Q7 CUDA 1, Q8 CUDA 2 on host `4090-1` |
+| code commit | `fa4d9501090f7d45cd7872092c236cb041956ff5` |
+
+### Atomic vocabulary and SID length
+
+| Track | Added SID tokens | `a/b/c` tokens | suffix tokens | 3-token items | 4-token items | max raw collision group |
+|---|---:|---:|---:|---:|---:|---:|
+| Q6 (`64^3`) | 222 | 64 / 64 / 64 | 30 | 5,826 | 1,667 | 30 |
+| Q7 (`128^3`) | 394 | 128 / 128 / 128 | 10 | 6,755 | 738 | 10 |
+| Q8 (`256^3`) | 784 | 256 / 256 / 256* | 23 | 7,092 | 401 | 23 |
+
+`*` Q8 uses 249 distinct third-level codes in the exported catalog.  Every
+added token was checked after `tokenizer.add_tokens` and encodes to exactly one
+ID.  `<d_n>` remains a collision disambiguation token, not a fourth RQ layer.
+
+### SFT artifacts
+
+| Track | Train runtime | Train loss | Validation loss | Checkpoint | Status |
+|---|---:|---:|---:|---|---|
+| Q6 | 40,208 s | 2.1361 | 2.5633 | `outputs/qwen3_4b/q6_sft/final_checkpoint` | complete |
+| Q7 | 39,929 s | 2.2415 | 2.9814 | `outputs/qwen3_4b/q7_sft/final_checkpoint` | complete |
+| Q8 | 40,559 s | 2.3668 | 3.5308 | `outputs/qwen3_4b/q8_sft/final_checkpoint` | complete |
+
+The Q7 development smoke used four optimizer steps and separately verified
+reload, finite loss, non-zero gradients on target SID rows, and a valid Trie
+constrained catalog SID.  Its artifacts are under
+`outputs/qwen3_4b/q7_sft_smoke/`.
+
+Full-test evaluation uses the same `scripts/evaluate.py` protocol for all
+tracks: 7,974 rows, 20 beams, `max_new_tokens=8`, and Trie-constrained SID
+generation.  At log creation time the three jobs were running under
+`outputs/qwen3_4b/q{6,7,8}_sft_eval/`; recommendation metrics will be appended
+only after their prediction files and metric JSON artifacts are complete.
