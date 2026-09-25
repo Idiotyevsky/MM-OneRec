@@ -189,6 +189,7 @@ def main(
             num_beams=num_beams,
             length_penalty=length_penalty,
             num_return_sequences=num_beams,
+            do_sample=False,
             pad_token_id = model.config.pad_token_id,
             eos_token_id = model.config.eos_token_id,
             max_new_tokens = max_new_tokens,
@@ -323,4 +324,3 @@ def main(
 
 if __name__ == '__main__':
     fire.Fire(main)
-
