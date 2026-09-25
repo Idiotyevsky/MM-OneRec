@@ -474,6 +474,33 @@ def train(
             print(f"[SFT] popular prefix={row['prefix']} freq={row['frequency']} weight={row['weight']:.6f}", flush=True)
         for row in frequency_payload["lowest_frequency_prefixes"][:5]:
             print(f"[SFT] rare prefix={row['prefix']} freq={row['frequency']} weight={row['weight']:.6f}", flush=True)
+        debug_indices = random.Random(seed).sample(range(len(train_data1)), min(5, len(train_data1)))
+        debug_examples = []
+        for debug_idx in debug_indices:
+            debug_item = train_data1[debug_idx]
+            debug_prefix = _first_sid_prefix_from_labels(debug_item["labels"], tokenizer)
+            debug_target = tokenizer.decode(
+                [int(token_id) for token_id in debug_item["labels"] if int(token_id) != -100],
+                skip_special_tokens=False,
+            )
+            debug_record = {
+                "index": int(debug_idx),
+                "target_sid": debug_target,
+                "first_prefix": debug_prefix,
+                "frequency": int(frequency_payload["prefix_counts"][debug_prefix]),
+                "raw_weight": float(frequency_payload["raw_weights"][debug_prefix]),
+                "weight": float(frequency_payload["weights"][debug_prefix]),
+            }
+            debug_examples.append(debug_record)
+            print(
+                f"[SFT] sample target={debug_target!r} prefix={debug_prefix} "
+                f"freq={debug_record['frequency']} raw={debug_record['raw_weight']:.6f} "
+                f"weight={debug_record['weight']:.6f}",
+                flush=True,
+            )
+        frequency_payload["sample_examples"] = debug_examples
+        with open(weights_file, "w", encoding="utf-8") as handle:
+            json.dump(frequency_payload, handle, indent=2)
 
         rec_rows = []
         for idx in range(len(train_data1)):
